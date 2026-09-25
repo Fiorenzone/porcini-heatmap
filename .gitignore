@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# Runtime / heavy local data (rebuild on machine)
+data/cache/
+data/forest/**/*.pkl
+data/forest/**/*.zip
+data/forest/**/*.shp
+data/forest/**/*.dbf
+data/forest/**/*.shx
+data/forest/**/*.sbn
+data/forest/**/*.sbx
+data/forest/**/*.prj
+data/forest/**/*.cpg
+data/forest/**/*.lyr
+data/forest/**/*.xml
+data/forest/CartaForestale2025*/
+data/forest/pr.zip
+data/bulletins/

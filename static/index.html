@@ -1,0 +1,688 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Porcini</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    :root {
+      --ink: #14110e; --dim: #6b625a; --line: rgba(20,17,14,.10);
+      --card: rgba(255,255,255,.82); --s1: #2563eb; --s2: #eab308;
+      --s3: #ea580c; --s4: #16a34a; --s5: #c026d3;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; color: var(--ink); background: #eceae5;
+      font: 15px/1.4 ui-sans-serif, -apple-system, system-ui, sans-serif;
+      -webkit-font-smoothing: antialiased; }
+    #map { position: absolute; inset: 0; }
+    .card { background: var(--card); backdrop-filter: blur(16px) saturate(1.3);
+      -webkit-backdrop-filter: blur(16px) saturate(1.3);
+      border: 1px solid var(--line); border-radius: 18px;
+      box-shadow: 0 1px 2px rgba(0,0,0,.05), 0 12px 32px -8px rgba(0,0,0,.18); }
+    #bar { position: absolute; z-index: 600; top: 14px; left: 14px; padding: 8px;
+      display: flex; gap: 6px; align-items: center; flex-wrap: wrap; max-width: calc(100% - 28px); }
+    #region[hidden] { display: none !important; }
+    #legend { position: absolute; z-index: 600; left: 14px; bottom: 20px; padding: 12px 14px; width: 234px; }
+    #panel { position: absolute; z-index: 600; top: 14px; right: 14px;
+      width: min(330px, calc(100% - 28px)); padding: 18px; display: none;
+      max-height: calc(100% - 28px); overflow: auto; }
+    select, button { font: inherit; color: inherit; background: #fff;
+      border: 1px solid var(--line); border-radius: 12px; padding: 8px 13px; cursor: pointer;
+      transition: background .15s, color .15s, transform .12s; }
+    select { padding-right: 8px; font-weight: 600; }
+    button:hover { background: #f6f4f1; }
+    button:active { transform: scale(.97); }
+    button.ghost { background: transparent; }
+    #status { color: var(--dim); font-size: 12.5px; padding: 0 6px; min-width: 0;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #status.busy::before { display: none; }
+    #spin {
+      width: 16px; height: 16px; flex: none; box-sizing: border-box;
+      border: 2px solid rgba(20,17,14,.15); border-top-color: var(--ink);
+      border-radius: 50%; animation: spin .65s linear infinite;
+    }
+    #spin[hidden] { display: none !important; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes pulse { 0%,100% { opacity: .25 } 50% { opacity: 1 } }
+    .legend-title { font-size: 11px; font-weight: 700; letter-spacing: .07em;
+      text-transform: uppercase; color: var(--dim); margin-bottom: 8px; }
+    .swatch { display: flex; gap: 9px; align-items: center; margin: 6px 0; font-size: 13px; }
+    .swatch i { width: 15px; height: 15px; border-radius: 5px; flex: none;
+      box-shadow: inset 0 0 0 1px rgba(0,0,0,.12); }
+    .chip { display: inline-flex; align-items: center; gap: 7px; font-size: 12px;
+      font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+      padding: 5px 11px; border-radius: 999px; color: #fff; }
+    .word { font-size: 30px; font-weight: 700; margin: 12px 0 0; letter-spacing: -.035em; line-height: 1.05; }
+    .sub { margin: 6px 0 0; color: var(--dim); font-size: 14px; }
+    .meta { margin: 14px 0 0; display: flex; flex-wrap: wrap; gap: 6px; }
+    .tag { font-size: 12px; color: var(--dim); background: rgba(20,17,14,.05);
+      border-radius: 8px; padding: 4px 9px; }
+    .rowbtn { margin-top: 16px; display: flex; gap: 8px; }
+    #advanced { display: none; margin-top: 14px; padding-top: 14px;
+      border-top: 1px solid var(--line); font-size: 13px; }
+    table { width: 100%; border-collapse: collapse; }
+    td { padding: 4px 0; }
+    td:last-child { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+    #advanced h4 { margin: 14px 0 4px; font-size: 11px; letter-spacing: .07em;
+      text-transform: uppercase; color: var(--dim); font-weight: 700; }
+    .spark { display: flex; gap: 3px; align-items: flex-end; height: 46px; margin-top: 6px; }
+    .spark div { flex: 1; border-radius: 3px 3px 0 0; min-height: 2px; }
+    .spark-x { display: flex; justify-content: space-between; font-size: 10px; color: var(--dim); margin-top: 4px; }
+    .verdict {
+      margin-top: 14px; padding: 12px 13px; border-radius: 14px;
+      border: 1px solid var(--line); background: rgba(20,17,14,.04);
+    }
+    .verdict strong { display: block; font-size: 13px; margin-bottom: 4px; }
+    .verdict p { margin: 0; font-size: 13px; color: var(--dim); line-height: 1.4; }
+    .verdict.conferma { background: rgba(22,163,74,.10); border-color: rgba(22,163,74,.25); }
+    .verdict.conferma strong { color: #166534; }
+    .verdict.ribalta, .verdict.smentisce {
+      background: rgba(220,38,38,.10); border-color: rgba(220,38,38,.28);
+    }
+    .verdict.ribalta strong, .verdict.smentisce strong { color: #b91c1c; }
+    .bull-wrap { background: transparent !important; border: none !important; }
+    .bull-pin {
+      width: 22px; height: 22px; border-radius: 50%;
+      border: 1.5px solid #1c1917; display: flex; align-items: center; justify-content: center;
+      font: 700 11px/1 ui-sans-serif, system-ui, sans-serif; color: #fff;
+      text-shadow: 0 1px 1px rgba(0,0,0,.35); box-shadow: 0 1px 3px rgba(0,0,0,.25);
+    }
+    .verdict.vicino { background: rgba(234,179,8,.12); border-color: rgba(234,179,8,.28); }
+    .verdict.vicino strong { color: #a16207; }
+    .verdict.assente, .verdict.neutro { background: rgba(20,17,14,.04); }
+    .verdict a { color: inherit; font-weight: 600; }
+    @media (max-width: 620px) {
+      #legend { display: none; }
+      #panel { top: auto; bottom: 14px; left: 14px; right: 14px; width: auto; }
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="bar" class="card">
+    <select id="species">
+      <option value="edulis">Porcino</option>
+      <option value="pinophilus">Pinicola</option>
+      <option value="aestivalis">Estatino</option>
+      <option value="aereus">Nero</option>
+    </select>
+    <span id="spin" hidden aria-label="calcolo heatmap"></span>
+    <button id="refresh" type="button" class="ghost">Aggiorna</button>
+    <button id="bull" type="button" class="ghost">Mostra Bollettini</button>
+    <button id="best" type="button" class="ghost">Mostra Zone Migliori</button>
+    <select id="region" hidden title="Filtro regione">
+      <option value="">In vista</option>
+      <option value="valle-daosta">Valle d'Aosta</option>
+      <option value="piemonte">Piemonte</option>
+      <option value="liguria">Liguria</option>
+      <option value="lombardia">Lombardia</option>
+      <option value="trentino-alto-adige">Trentino-Alto Adige</option>
+      <option value="veneto">Veneto</option>
+      <option value="friuli-venezia-giulia">Friuli-Venezia Giulia</option>
+      <option value="emilia-romagna">Emilia-Romagna</option>
+      <option value="toscana">Toscana</option>
+      <option value="umbria">Umbria</option>
+      <option value="marche">Marche</option>
+      <option value="lazio">Lazio</option>
+      <option value="abruzzo">Abruzzo</option>
+      <option value="molise">Molise</option>
+      <option value="campania">Campania</option>
+      <option value="puglia">Puglia</option>
+      <option value="basilicata">Basilicata</option>
+      <option value="calabria">Calabria</option>
+      <option value="sicilia">Sicilia</option>
+      <option value="sardegna">Sardegna</option>
+    </select>
+    <span id="status"></span>
+  </div>
+  <div id="legend" class="card">
+    <div class="legend-title">Stadio della buttata</div>
+    <div class="swatch"><i style="background:#78716c"></i>Non idoneo</div>
+    <div class="swatch"><i style="background:var(--s1)"></i>Idonea, ferma</div>
+    <div class="swatch"><i style="background:var(--s2)"></i>Incubazione</div>
+    <div class="swatch"><i style="background:var(--s3)"></i>Avvio</div>
+    <div class="swatch"><i style="background:var(--s4)"></i>Crescita buona</div>
+    <div class="swatch"><i style="background:var(--s5)"></i>Eccezionale</div>
+  </div>
+  <aside id="panel" class="card"></aside>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    const map = L.map("map", { zoomControl: true }).setView([44.55, 10.0], 9);
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution: "&copy; OpenStreetMap", maxZoom: 16
+    }).addTo(map);
+    const pins = L.layerGroup().addTo(map);
+    let baseSheet = null;
+    let detailSheet = null;
+    let baseCover = null;
+    let baseZoom = 0;
+    let cells = [];
+    let step = 0.05;
+    const STAGE = {
+      0: [120, 113, 108, 55],
+      1: [37, 99, 235, 90],
+      2: [234, 179, 8, 100],
+      3: [234, 88, 12, 105],
+      4: [22, 163, 74, 110],
+      5: [192, 38, 211, 115]
+    };
+    const STAGE_WORD = {
+      0: ["Non idoneo", "Fuori habitat: pianura, città, oppure bosco non da porcino."],
+      1: ["Idonea, fermo", "Bosco e quota ok. Manca la pioggia o il meteo di questi giorni."],
+      2: ["Incubazione", "Pioggia recente. Crescita attesa più avanti."],
+      3: ["Avvio", "Incubazione avanti. Primi esemplari, buttata non piena."],
+      4: ["Buona", "Habitat, pioggia e meteo favorevoli."],
+      5: ["Eccezionale", "Probabilità e quantità insieme alte."]
+    };
+    let bulletOn = false;
+    let bestOn = false;
+    let timer = null;
+    let inflight = null;
+    let weatherReady = false;
+
+    const WORDS = {
+      vai: ["Vai", "Oggi il bosco è in finestra."],
+      aspetta: ["Aspetta", "Il picco è più avanti."],
+      lascia: ["Lascia", "Oggi non è la giornata."],
+      prudenza: ["Incerto", "Manca un dato, non forzare."]
+    };
+
+    function paintLayer(list, gridStep, which) {
+      if (which === "base" && baseSheet) {
+        map.removeLayer(baseSheet);
+        baseSheet = null;
+      }
+      if (which === "detail" && detailSheet) {
+        map.removeLayer(detailSheet);
+        detailSheet = null;
+      }
+      if (!list.length) return null;
+      const grid = new Map();
+      let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
+      list.forEach((c) => {
+        const iy = Math.round(c.lat / gridStep);
+        const ix = Math.round(c.lon / gridStep);
+        grid.set(iy + "," + ix, c.stage == null ? 0 : c.stage);
+        if (c.lat < minLat) minLat = c.lat;
+        if (c.lat > maxLat) maxLat = c.lat;
+        if (c.lon < minLon) minLon = c.lon;
+        if (c.lon > maxLon) maxLon = c.lon;
+      });
+      const y0 = Math.round(minLat / gridStep);
+      const y1 = Math.round(maxLat / gridStep);
+      const x0 = Math.round(minLon / gridStep);
+      const x1 = Math.round(maxLon / gridStep);
+      const nh = y1 - y0 + 1;
+      const nw = x1 - x0 + 1;
+      const scale = 10;
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, nw * scale);
+      canvas.height = Math.max(1, nh * scale);
+      const ctx = canvas.getContext("2d");
+      const radius = scale * 1.15;
+      for (let y = 0; y < nh; y++) {
+        for (let x = 0; x < nw; x++) {
+          const stage = grid.get((y0 + y) + "," + (x0 + x));
+          if (stage == null) continue;
+          const [r, g, b, a] = STAGE[stage] || STAGE[0];
+          const cx = (x + 0.5) * scale;
+          const cy = (nh - 1 - y + 0.5) * scale;
+          const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
+          const base = `${r},${g},${b}`;
+          grad.addColorStop(0, `rgba(${base},${(a / 255) * 0.72})`);
+          grad.addColorStop(0.55, `rgba(${base},${(a / 255) * 0.45})`);
+          grad.addColorStop(1, `rgba(${base},0)`);
+          ctx.fillStyle = grad;
+          ctx.beginPath();
+          ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+      const south = (y0 - 0.5) * gridStep;
+      const north = (y1 + 0.5) * gridStep;
+      const west = (x0 - 0.5) * gridStep;
+      const east = (x1 + 0.5) * gridStep;
+      const layer = L.imageOverlay(canvas.toDataURL("image/png"), [[south, west], [north, east]], {
+        opacity: 1,
+        interactive: false
+      }).addTo(map);
+      const box = { s: south, w: west, n: north, e: east };
+      if (which === "base") {
+        baseSheet = layer;
+        baseCover = box;
+        baseZoom = map.getZoom();
+      } else {
+        detailSheet = layer;
+      }
+      return box;
+    }
+
+    const STAGE_CSS = { 1: "var(--s1)", 2: "var(--s2)", 3: "var(--s3)", 4: "var(--s4)", 5: "var(--s5)" };
+
+    function dayLabel(iso) {
+      if (!iso) return "";
+      const d = new Date(iso + "T12:00:00");
+      return d.toLocaleDateString("it-IT", { weekday: "short", day: "numeric", month: "short" });
+    }
+
+    const HOST_IT = {
+      fagg: "faggio", pecc: "abete rosso", abiet: "abete", abete: "abete",
+      picea: "abete rosso", castagn: "castagno", querc: "quercia", rover: "rovere",
+      cerro: "cerro", farnia: "farnia", pino: "pino", pinet: "pino", laric: "larice",
+      cembr: "cembro", mughet: "mugo", betul: "betulla", carpin: "carpino",
+      ostri: "ostrya", orno: "orniello", aceri: "acero", frassin: "frassino"
+    };
+
+    function hostLabel(hit) {
+      if (!hit) return "non riconosciuto";
+      return HOST_IT[hit] || hit;
+    }
+
+    function openCell(c) {
+      const panel = document.getElementById("panel");
+      panel.style.display = "block";
+      const pair = STAGE_WORD[c.stage] || WORDS[c.decision] || WORDS.prudenza;
+      const tags = [];
+      if (c.leaf_note) tags.push(c.leaf_note.split(": ").pop());
+      if (c.elev != null) tags.push(Math.round(c.elev) + " m");
+      if (c.since_rain != null) tags.push(`pioggia ${c.since_rain} gg fa`);
+      if (c.rain26 != null) tags.push(`${Math.round(c.rain26)} mm in 26 gg`);
+      if (c.shock) tags.push("shock termico");
+      const when = c.best_date && c.stage < 4 ? `Giorno migliore: ${dayLabel(c.best_date)}.` : "";
+      panel.innerHTML = `
+        <span class="chip" style="background:${STAGE_CSS[c.stage] || "var(--dim)"}">${pair[0]}</span>
+        <p class="word">${Math.round((c.p || 0) * 100)}<span style="font-size:18px;font-weight:600">% probabilità</span></p>
+        <p class="sub">${pair[1]} ${when}</p>
+        <div class="meta">${tags.map((t) => `<span class="tag">${t}</span>`).join("")}</div>
+        <div id="verdict" class="verdict assente"><strong>Bollettini…</strong><p>cerco osservazioni pubbliche vicine</p></div>
+        <div class="rowbtn">
+          <button id="more" type="button">Dettaglio</button>
+          <button id="close" type="button" class="ghost">Chiudi</button>
+        </div>
+        <div id="advanced"></div>`;
+      document.getElementById("more").onclick = () => loadDetail(c);
+      document.getElementById("close").onclick = () => {
+        panel.style.display = "none";
+        if (!bulletOn && !bestOn) pins.clearLayers();
+      };
+      loadVerdict(c);
+    }
+
+    function loadVerdict(c) {
+      const box = document.getElementById("verdict");
+      if (!box) return;
+      fetch(`/api/bulletins/compare?lat=${c.lat}&lon=${c.lon}&stage=${c.stage || 0}`)
+        .then((r) => r.json())
+        .then((d) => {
+          const v = d.verdict || "assente";
+          box.className = "verdict " + v;
+          const link = (d.areas && d.areas[0] && d.areas[0].url)
+            ? ` <a href="${d.areas[0].url}" target="_blank" rel="noopener">fonte</a>`
+            : "";
+          box.innerHTML = `<strong>${d.title || "Bollettini"}</strong><p>${d.body || ""}${link}</p>`;
+        })
+        .catch(() => {
+          box.className = "verdict assente";
+          box.innerHTML = "<strong>Bollettini non disponibili</strong><p>Rete o parser in pausa.</p>";
+        });
+    }
+
+    function loadDetail(c) {
+      const box = document.getElementById("advanced");
+      box.style.display = "block";
+      // Se days già dal click /api/cell, evita secondo roundtrip
+      if (c.days && c.days.length) {
+        renderDetail(c, box);
+        return;
+      }
+      box.textContent = "carico…";
+      fetch(`/api/cell?lat=${c.lat}&lon=${c.lon}&species=${document.getElementById("species").value}`)
+        .then((r) => r.json())
+        .then((d) => renderDetail(d, box))
+        .catch(() => { box.textContent = "dettaglio non disponibile"; });
+    }
+
+    function renderDetail(d, box) {
+      const days = d.days || [];
+      const spark = days.map((x) => {
+        const h = Math.max(2, Math.round((x.p || 0) * 46));
+        return `<div style="height:${h}px;background:${x.p >= 0.55 ? "var(--s4)" : x.p >= 0.38 ? "var(--s3)" : "var(--s2)"}" title="${x.date}: ${Math.round((x.p || 0) * 100)}%"></div>`;
+      }).join("");
+      const ends = days.length ? [dayLabel(days[0].date), dayLabel(days[days.length - 1].date)] : ["", ""];
+      const year = d.last_year ? `${d.last_year.rain26} mm` : "non disponibile";
+      box.innerHTML = `
+        <h4>Prossimi giorni</h4>
+        <div class="spark">${spark}</div>
+        <div class="spark-x"><span>${ends[0]}</span><span>${ends[1]}</span></div>
+        <h4>Il posto</h4>
+        <table>
+          <tr><td>Bosco</td><td>${(d.leaf_note || "").split(": ").pop()}</td></tr>
+          <tr><td>Ospite</td><td>${hostLabel(d.host_hit)}</td></tr>
+          <tr><td>Quota</td><td>${Math.round(d.elev)} m</td></tr>
+          <tr><td>Pendenza</td><td>${d.slope}°</td></tr>
+          <tr><td>Esposizione</td><td>${d.aspect}°</td></tr>
+          <tr><td>Punto</td><td>${Number(d.lat).toFixed(4)}, ${Number(d.lon).toFixed(4)}</td></tr>
+        </table>
+        <h4>Oggi</h4>
+        <table>
+          <tr><td>Probabilità</td><td>${Math.round((d.p || 0) * 100)}%</td></tr>
+          <tr><td>Quantità attesa</td><td>${Math.round(d.abundance || 0)}/100</td></tr>
+          <tr><td>Temperatura suolo</td><td>${d.t ?? "n.d."} °C</td></tr>
+          <tr><td>Pioggia 26 giorni</td><td>${Math.round(d.rain26 || 0)} mm</td></tr>
+          <tr><td>Un anno fa</td><td>${year}</td></tr>
+        </table>`;
+    }
+
+    function clearPinsIfIdle() {
+      if (!bulletOn && !bestOn) pins.clearLayers();
+    }
+
+    // Bbox approssimati ISTAT-ish. Abbastanza per filtrare top zone.
+    const REGIONS = {
+      "valle-daosta": { s: 45.45, w: 6.80, n: 45.99, e: 7.95 },
+      piemonte: { s: 44.05, w: 6.62, n: 46.46, e: 9.22 },
+      liguria: { s: 43.75, w: 7.50, n: 44.68, e: 10.08 },
+      lombardia: { s: 44.68, w: 8.48, n: 46.64, e: 11.43 },
+      "trentino-alto-adige": { s: 45.65, w: 10.38, n: 47.10, e: 12.48 },
+      veneto: { s: 44.78, w: 10.62, n: 46.68, e: 13.10 },
+      "friuli-venezia-giulia": { s: 45.58, w: 12.32, n: 46.65, e: 13.92 },
+      "emilia-romagna": { s: 43.73, w: 9.18, n: 45.14, e: 12.85 },
+      toscana: { s: 42.35, w: 9.68, n: 44.48, e: 12.38 },
+      umbria: { s: 42.35, w: 11.82, n: 43.62, e: 13.27 },
+      marche: { s: 42.72, w: 12.18, n: 43.98, e: 13.92 },
+      lazio: { s: 41.18, w: 11.45, n: 42.85, e: 14.00 },
+      abruzzo: { s: 41.68, w: 13.18, n: 42.92, e: 14.80 },
+      molise: { s: 41.45, w: 14.00, n: 42.08, e: 15.18 },
+      campania: { s: 39.98, w: 13.75, n: 41.52, e: 15.82 },
+      puglia: { s: 39.78, w: 14.93, n: 42.15, e: 18.52 },
+      basilicata: { s: 39.88, w: 15.33, n: 41.15, e: 16.87 },
+      calabria: { s: 37.90, w: 15.62, n: 40.15, e: 17.25 },
+      sicilia: { s: 36.64, w: 12.42, n: 38.32, e: 15.68 },
+      sardegna: { s: 38.85, w: 8.13, n: 41.32, e: 9.85 }
+    };
+
+    function bestPool() {
+      const key = document.getElementById("region").value;
+      const box = key ? REGIONS[key] : null;
+      const src = box
+        ? (baseCells.length ? baseCells : cells)
+        : (detailSheet ? cells : (baseCells.length ? baseCells : cells));
+      return src.filter((c) => {
+        if ((c.stage || 0) <= 0) return false;
+        if (!box) return true;
+        return c.lat >= box.s && c.lat <= box.n && c.lon >= box.w && c.lon <= box.e;
+      });
+    }
+
+    function paintBestPins() {
+      pins.clearLayers();
+      const key = document.getElementById("region").value;
+      const box = key ? REGIONS[key] : null;
+      const label = key
+        ? (document.getElementById("region").selectedOptions[0].textContent || key)
+        : "in vista";
+      const top = [...bestPool()]
+        .sort((a, b) => {
+          const ds = (b.stage || 0) - (a.stage || 0);
+          if (ds) return ds;
+          return (b.p || 0) - (a.p || 0);
+        })
+        .slice(0, 5);
+      if (!top.length) {
+        say(box ? `nessuna zona idonea in ${label}` : "nessuna zona idonea in vista");
+        return;
+      }
+      top.forEach((o, i) => {
+        const pair = STAGE_WORD[o.stage] || ["?", ""];
+        L.circleMarker([o.lat, o.lon], {
+          radius: 9,
+          color: "#1c1917",
+          weight: 2,
+          fillColor: STAGE_CSS[o.stage] || "#78716c",
+          fillOpacity: 0.95
+        })
+          .bindPopup(`<b>#${i + 1} ${pair[0]}</b><br>${Math.round((o.p || 0) * 100)}% · ${Math.round(o.elev || 0)} m<br>${(o.leaf_note || "").split(": ").pop() || ""}`)
+          .bindTooltip(`#${i + 1}`, { permanent: true, direction: "top", offset: [0, -8] })
+          .on("click", () => openCell(o))
+          .addTo(pins);
+      });
+      if (box) {
+        map.fitBounds([[box.s, box.w], [box.n, box.e]], { padding: [40, 40], maxZoom: 9 });
+      }
+      say(`top ${top.length} · ${label}`);
+    }
+
+    function showBestZones() {
+      bestOn = !bestOn;
+      document.getElementById("best").classList.toggle("ghost", !bestOn);
+      const regionEl = document.getElementById("region");
+      regionEl.hidden = !bestOn;
+      if (!bestOn) {
+        clearPinsIfIdle();
+        if (!bulletOn) say("");
+        return;
+      }
+      if (bulletOn) {
+        bulletOn = false;
+        document.getElementById("bull").classList.add("ghost");
+      }
+      paintBestPins();
+    }
+
+    const BASE_BOX = { s: 36.6, w: 6.6, n: 47.1, e: 18.5 };
+
+    function paddedBounds() {
+      const b = map.getBounds();
+      const latPad = (b.getNorth() - b.getSouth()) * 0.25;
+      const lonPad = (b.getEast() - b.getWest()) * 0.25;
+      return {
+        s: b.getSouth() - latPad,
+        w: b.getWest() - lonPad,
+        n: b.getNorth() + latPad,
+        e: b.getEast() + lonPad
+      };
+    }
+
+    let baseCells = [];
+    let baseStep = 0.05;
+
+    function say(text, busy) {
+      const el = document.getElementById("status");
+      el.textContent = text;
+      el.classList.toggle("busy", !!busy);
+    }
+
+    let heatBusy = 0;
+    function setHeatBusy(on) {
+      heatBusy += on ? 1 : -1;
+      if (heatBusy < 0) heatBusy = 0;
+      document.getElementById("spin").hidden = heatBusy === 0;
+    }
+
+    async function loadView(detail) {
+      if (inflight) inflight.abort();
+      inflight = new AbortController();
+      setHeatBusy(true);
+      const b = detail ? paddedBounds() : BASE_BOX;
+      const species = document.getElementById("species").value;
+      const url = `/api/viewport?s=${b.s}&w=${b.w}&n=${b.n}&e=${b.e}&species=${species}`;
+      try {
+        const res = await fetch(url, { signal: inflight.signal });
+        const data = await res.json();
+        if (!res.ok) {
+          say("riprova tra poco");
+          return;
+        }
+        cells = data.cells || [];
+        step = data.step_deg || step;
+        if (!detail) {
+          baseCells = cells;
+          baseStep = step;
+        }
+        say("");
+        paintLayer(cells, step, detail ? "detail" : "base");
+      } catch (err) {
+        if (err.name !== "AbortError") say("riprova tra poco");
+      } finally {
+        setHeatBusy(false);
+      }
+    }
+
+    function dropDetail() {
+      if (!detailSheet) return;
+      map.removeLayer(detailSheet);
+      detailSheet = null;
+      cells = baseCells;
+      step = baseStep;
+      say("");
+    }
+
+    function maybeRefine() {
+      if (!weatherReady || !baseCover) return;
+      if (map.getZoom() < baseZoom + 2) {
+        clearTimeout(timer);
+        dropDetail();
+        return;
+      }
+      clearTimeout(timer);
+      say("dettaglio zona", true);
+      timer = setTimeout(() => loadView(true), 800);
+    }
+
+    async function refresh(italy) {
+      say("scarico il meteo", true);
+      const res = await fetch("/api/refresh?italy=" + (italy ? "1" : "0"));
+      const data = await res.json();
+      say(res.ok ? "" : "meteo non aggiornato, riprova");
+      if (res.ok) {
+        weatherReady = true;
+        loadView();
+      }
+    }
+
+    async function showBulletins() {
+      bulletOn = !bulletOn;
+      pins.clearLayers();
+      document.getElementById("bull").classList.toggle("ghost", !bulletOn);
+      if (!bulletOn) {
+        clearPinsIfIdle();
+        return;
+      }
+      if (bestOn) {
+        bestOn = false;
+        document.getElementById("best").classList.add("ghost");
+        document.getElementById("region").hidden = true;
+      }
+      say("bollettini", true);
+      const data = await (await fetch("/api/bulletins")).json();
+      const LVL_FILL = {
+        0: "#78716c",
+        1: "#2563eb",
+        2: "#eab308",
+        3: "#ea580c",
+        4: "#16a34a",
+        5: "#c026d3"
+      };
+      let n = 0;
+      (data.reports || []).forEach((rep) => {
+        (rep.areas || []).forEach((a) => {
+          if (a.lat == null) return;
+          n += 1;
+          let label;
+          if (a.level == null) label = "crescita non segnalata oggi";
+          else if (a.level === 0) label = "0/5 assente";
+          else label = a.level + "/5" + (a.level_word ? ` ${a.level_word}` : "");
+          const paid = a.paid === true
+            || a.source === "Geoticket"
+            || a.source === "Fungo di Borgotaro";
+          const paidNote = a.paid_note
+            || (paid ? "Permesso raccolta a pagamento — serve ticket (non accesso libero)." : "");
+          const extra = a.note ? `<br><i style="color:#6b625a">${a.note}</i>` : "";
+          const pay = paid ? `<br><b style="color:#b45309">$ ${paidNote}</b>` : "";
+          const link = a.url ? `<br><a href="${a.url}" target="_blank" rel="noopener">${paid ? "compra / info ticket" : "apri fonte"}</a>` : "";
+          const fill = a.level == null ? "#a8a29e" : (LVL_FILL[a.level] || "#a8a29e");
+          const icon = L.divIcon({
+            className: "bull-wrap",
+            iconSize: [22, 22],
+            iconAnchor: [11, 11],
+            html: `<div class="bull-pin" style="background:${fill}">${paid ? "$" : ""}</div>`
+          });
+          L.marker([a.lat, a.lon], { icon })
+            .bindPopup(`<b>${a.source}</b><br>${a.name}<br>${label}${rep.stale ? " · vecchio" : ""}${pay}${extra}${link}`)
+            .addTo(pins);
+        });
+      });
+      say(n ? `${n} aree ufficiali` : "nessun bollettino");
+    }
+
+    document.getElementById("species").onchange = () => { dropDetail(); loadView(false); };
+    document.getElementById("refresh").onclick = () => refresh(true);
+    document.getElementById("bull").onclick = showBulletins;
+    document.getElementById("best").onclick = showBestZones;
+    document.getElementById("region").onchange = () => {
+      if (bestOn) paintBestPins();
+    };
+    map.on("click", (e) => {
+      // Stessa cella della heatmap dipinta → p/stage coincidenti col colore sotto il dito.
+      const lat = e.latlng.lat;
+      const lon = e.latlng.lng;
+      const species = document.getElementById("species").value;
+      const pool = detailSheet && cells.length ? cells : (baseCells.length ? baseCells : cells);
+      const st = detailSheet && cells.length ? step : (baseStep || step || 0.05);
+      let best = null;
+      let bestD = Infinity;
+      for (let i = 0; i < pool.length; i++) {
+        const c = pool[i];
+        const d = (c.lat - lat) * (c.lat - lat) + (c.lon - lon) * (c.lon - lon);
+        if (d < bestD) {
+          bestD = d;
+          best = c;
+        }
+      }
+      const lim = st * 0.75;
+      if (best && Math.sqrt(bestD) <= lim) {
+        say("");
+        openCell(best);
+        return;
+      }
+      say("punto…", true);
+      fetch(`/api/cell?lat=${lat}&lon=${lon}&species=${species}`)
+        .then((r) => r.json())
+        .then((d) => {
+          say("");
+          if (d.error) {
+            say("nessun dato qui");
+            return;
+          }
+          openCell(d);
+        })
+        .catch(() => say("riprova punto"));
+    });
+    map.on("moveend", maybeRefine);
+    fetch("/api/status").then((r) => r.json()).then(async (s) => {
+      if (s.stations > 0) {
+        weatherReady = true;
+        loadView(false);
+        if (s.stations < 400) {
+          say("completo meteo Italia…", true);
+          try {
+            const res = await fetch("/api/refresh?italy=1");
+            const info = await res.json();
+            if (res.ok && (info.count || 0) > s.stations) {
+              say("");
+              loadView(false);
+            } else {
+              say("copertura nord ok · Aggiorna per sud");
+            }
+          } catch (_) {
+            say("copertura nord ok · Aggiorna per sud");
+          }
+        }
+      } else {
+        say("premi Aggiorna");
+      }
+    });
+  </script>
+</body>
+</html>
