@@ -1,0 +1,11 @@
+__pycache__
+*.pyc
+.git
+data/cache
+data/forest/**/*.pkl
+data/forest/**/*.zip
+data/forest/**/*.shp
+data/forest/**/*.dbf
+data/forest/CartaForestale*
+data/forest/pr.zip
+.DS_Store

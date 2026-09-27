@@ -111,6 +111,93 @@ def _therm(tmean: float | None, topt: float) -> float:
     return math.exp(-0.5 * ((tmean - topt) / 4.0) ** 2)
 
 
+def _vpd_kpa(tmean: float | None, rh: float | None) -> float | None:
+    """Deficit di pressione di vapore (kPa), Tetens. Driver primario perdita H2O sporocarpo."""
+    if tmean is None or rh is None:
+        return None
+    # Magnus/Tetens sull'acqua (FAO-56 / meteorologia operativa)
+    es = 0.6108 * math.exp((17.27 * tmean) / (tmean + 237.3))
+    rh_c = max(0.0, min(100.0, float(rh)))
+    return max(0.0, es * (1.0 - rh_c / 100.0))
+
+
+def _wind_ms(wind_kmh: float | None) -> float:
+    """Open-Meteo wind_speed_10m_max è in km/h → m/s."""
+    return max(0.0, float(wind_kmh or 0.0) / 3.6)
+
+
+def _canopy_wind_frac(leaf: str) -> float:
+    """Frazione del vento a 10 m che arriva al sottobosco (rugosità chioma)."""
+    return {"conifere": 0.28, "misto": 0.35, "latifoglie": 0.42}.get(leaf, 0.55)
+
+
+def _desiccation(
+    past: list[dict], leaf: str, since: int | None
+) -> tuple[float, dict]:
+    """
+    Moltiplicatore su P da domanda evaporativa al suolo/sporocarpo.
+
+    Basi:
+    - Lilleskov et al. 2009 (New Phytol.): VPD predice water-loss rate degli sporocarpi;
+      vento alza la conductance aerodinamica del boundary layer.
+    - ET0 FAO-56 (già in Open-Meteo) porta il vento nel percorso *suolo* via _bucket —
+      qui NON moltiplichiamo di nuovo ET0 (evita doppio conteggio).
+    - Karavani / Ogaya: umidità suolo + domanda evaporativa > pioggia grezza.
+
+    Finestra: peso massimo quando i primordia/carpofori sono esposti (5–16 gg post-innesco).
+    """
+    meta = {"vpd": None, "wind_ms": None, "evap_demand": None, "desiccation": 1.0}
+    recent = past[-3:] if len(past) >= 3 else past
+    if not recent:
+        return 1.0, meta
+
+    shelter = _canopy_wind_frac(leaf)
+    vpds: list[float] = []
+    us: list[float] = []
+    for d in recent:
+        v = _vpd_kpa(d.get("tmean"), d.get("rh"))
+        if v is not None:
+            vpds.append(v)
+        # vento sotto chioma ≈ frazione del max giornaliero a 10 m
+        us.append(_wind_ms(d.get("wind")) * shelter)
+
+    if not vpds:
+        return 1.0, meta
+
+    vpd = sum(vpds) / len(vpds)
+    u = sum(us) / len(us)
+    # Conductance aerodinamica normalizzata: g_a ∝ u/(u+u0), u0 tipico understory
+    aero = u / (u + 1.4)
+    # Domanda evaporativa effettiva (kPa-eq): VPD amplificato dal rimescolamento
+    # (0.50 vs quiete → fino a ~1.45× con vento forte sottobosco)
+    demand = vpd * (0.50 + 0.95 * aero)
+
+    # Fattore continuo: ~1 a domanda bassa/media autunnale; cala sopra ~1.2–1.4 kPa-eq
+    # Forma: 1 / (1 + (D/D0)^n) — monotona, calibrata su range VPD campo
+    d0 = 1.30
+    factor = 1.0 / (1.0 + (demand / d0) ** 2.3)
+    factor = max(0.42, min(1.0, factor))
+
+    # Peso fisiologico: quanto i carpofori/primordia sono esposti all'aria
+    if since is None:
+        weight = 0.30
+    elif since <= 4:
+        weight = 0.60  # lettiera bagnata: vento ri-asciuga film superficiale
+    elif since <= 16:
+        weight = 1.00  # finestra fruizione
+    else:
+        weight = 0.35
+
+    blended = 1.0 - weight * (1.0 - factor)
+    meta = {
+        "vpd": round(vpd, 2),
+        "wind_ms": round(u, 2),
+        "evap_demand": round(demand, 2),
+        "desiccation": round(blended, 2),
+    }
+    return blended, meta
+
+
 def _shock(days: list[dict]) -> bool:
     if len(days) < 14:
         return False
@@ -127,7 +214,12 @@ def _shock(days: list[dict]) -> bool:
 
 
 def _bucket(days: list[dict], slope: float, twi: float, rad: float) -> tuple[float, float]:
-    """Ritorna (umidità finale 0-1, abbondanza 0-100). Usa il suolo del modello dove c'è."""
+    """
+    Bilancio idrico lettiera/suolo superficiale → (swc, abbondanza).
+
+    ET0 Open-Meteo = FAO-56 Penman–Monteith: include già vento, Rad, T, RH.
+    Non moltiplicare ET0 per un secondo fattore vento (doppio conteggio).
+    """
     cap = min(0.42, 0.20 + 0.04 * max(0.0, twi))
     swc = min(cap, 0.22)
     good = 0.0
@@ -136,10 +228,9 @@ def _bucket(days: list[dict], slope: float, twi: float, rad: float) -> tuple[flo
         return swc, 0.0
     for d in used:
         rain = (d.get("precip") or 0) / 1000.0
+        # et0 già wind-aware (FAO-56); rad = esposizione versante
         et = (d.get("et0") or 0) / 1000.0 * rad
         runoff = rain * min(0.65, max(0.0, slope) / 40.0)
-        wind = d.get("wind") or 0
-        et *= 1 + min(0.35, wind / 40.0)
         swc = swc + rain - et - runoff
         swc = max(0.04, min(cap, swc))
         model = d.get("smoist")
@@ -237,9 +328,14 @@ def score_series(
         since, incub = _incubation(past)
         rh = _mean([d.get("rh") for d in past[-5:]])
         rh_term = 1.0 if rh is None else max(0.75, min(1.1, 0.55 + rh / 150.0))
-        p = hab * therm * rh_term * (0.25 + 0.25 * rain_term + 0.35 * incub + (0.15 if shock else 0.0))
+        dry, dry_meta = _desiccation(past, leaf, since)
+        p = hab * therm * rh_term * dry * (
+            0.25 + 0.25 * rain_term + 0.35 * incub + (0.15 if shock else 0.0)
+        )
         p = min(1.0, p)
         swc, abund = _bucket(past, slope, twi, rad)
+        # Carpofori esposti: stessa domanda evaporativa taglia anche abbondanza utile
+        abund *= 0.55 + 0.45 * dry
         if p < 0.35:
             abund = 0.0
         out_days.append(
@@ -253,6 +349,10 @@ def score_series(
                 "rain26": round(rain26, 1),
                 "since_rain": since,
                 "incub": round(incub, 2),
+                "vpd": dry_meta.get("vpd"),
+                "wind_ms": dry_meta.get("wind_ms"),
+                "evap_demand": dry_meta.get("evap_demand"),
+                "desiccation": dry_meta.get("desiccation"),
             }
         )
     if not out_days:

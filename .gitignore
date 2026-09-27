@@ -24,3 +24,7 @@ data/forest/**/*.xml
 data/forest/CartaForestale2025*/
 data/forest/pr.zip
 data/bulletins/
+
+# Compatta: va in repo / Docker (≈2MB). Pickle restano ignorati.
+!data/forest/forest_grid.bin
+!data/forest/forest_grid.json

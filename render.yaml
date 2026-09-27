@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: porcini-heatmap
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/status
+    envVars:
+      - key: PORCINI_BUILD_GRID
+        value: "0"
+      - key: PYTHONUNBUFFERED
+        value: "1"

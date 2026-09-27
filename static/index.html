@@ -94,7 +94,27 @@
     .verdict a { color: inherit; font-weight: 600; }
     @media (max-width: 620px) {
       #legend { display: none; }
-      #panel { top: auto; bottom: 14px; left: 14px; right: 14px; width: auto; }
+      #bar {
+        top: 8px; left: 8px; right: 8px; max-width: none;
+        padding: 6px; gap: 4px; border-radius: 14px;
+      }
+      #bar select, #bar button {
+        padding: 8px 10px; font-size: 13px; border-radius: 10px;
+        min-height: 40px; -webkit-tap-highlight-color: transparent;
+      }
+      #bar #status { display: none; }
+      #panel {
+        top: auto; bottom: 0; left: 0; right: 0; width: auto;
+        max-height: min(58vh, 420px); border-radius: 18px 18px 0 0;
+        padding: 14px 16px 22px; padding-bottom: max(22px, env(safe-area-inset-bottom));
+      }
+      .word { font-size: 26px; }
+      .chip { font-size: 11px; }
+      .leaflet-control-zoom { margin-bottom: 12px !important; }
+    }
+    @media (max-width: 420px) {
+      #bar #refresh { display: none; }
+      #region { max-width: 42vw; }
     }
   </style>
 </head>
@@ -289,6 +309,11 @@
       if (c.since_rain != null) tags.push(`pioggia ${c.since_rain} gg fa`);
       if (c.rain26 != null) tags.push(`${Math.round(c.rain26)} mm in 26 gg`);
       if (c.shock) tags.push("shock termico");
+      if (c.wind_ms != null) tags.push(`vento sottobosco ${c.wind_ms.toFixed(1)} m/s`);
+      if (c.vpd != null) tags.push(`VPD ${c.vpd.toFixed(2)} kPa`);
+      if (c.desiccation != null && c.desiccation < 0.92) {
+        tags.push(`desiccazione ×${c.desiccation.toFixed(2)}`);
+      }
       const when = c.best_date && c.stage < 4 ? `Giorno migliore: ${dayLabel(c.best_date)}.` : "";
       panel.innerHTML = `
         <span class="chip" style="background:${STAGE_CSS[c.stage] || "var(--dim)"}">${pair[0]}</span>
@@ -370,6 +395,9 @@
           <tr><td>Quantità attesa</td><td>${Math.round(d.abundance || 0)}/100</td></tr>
           <tr><td>Temperatura suolo</td><td>${d.t ?? "n.d."} °C</td></tr>
           <tr><td>Pioggia 26 giorni</td><td>${Math.round(d.rain26 || 0)} mm</td></tr>
+          <tr><td>VPD aria</td><td>${d.vpd != null ? d.vpd.toFixed(2) + " kPa" : "n.d."}</td></tr>
+          <tr><td>Vento sottobosco</td><td>${d.wind_ms != null ? d.wind_ms.toFixed(1) + " m/s" : "n.d."}</td></tr>
+          <tr><td>Fattore desiccazione</td><td>${d.desiccation != null ? "×" + d.desiccation.toFixed(2) : "n.d."}</td></tr>
           <tr><td>Un anno fa</td><td>${year}</td></tr>
         </table>`;
     }
@@ -378,50 +406,97 @@
       if (!bulletOn && !bestOn) pins.clearLayers();
     }
 
-    // Bbox approssimati ISTAT-ish. Abbastanza per filtrare top zone.
-    const REGIONS = {
-      "valle-daosta": { s: 45.45, w: 6.80, n: 45.99, e: 7.95 },
-      piemonte: { s: 44.05, w: 6.62, n: 46.46, e: 9.22 },
-      liguria: { s: 43.75, w: 7.50, n: 44.68, e: 10.08 },
-      lombardia: { s: 44.68, w: 8.48, n: 46.64, e: 11.43 },
-      "trentino-alto-adige": { s: 45.65, w: 10.38, n: 47.10, e: 12.48 },
-      veneto: { s: 44.78, w: 10.62, n: 46.68, e: 13.10 },
-      "friuli-venezia-giulia": { s: 45.58, w: 12.32, n: 46.65, e: 13.92 },
-      "emilia-romagna": { s: 43.73, w: 9.18, n: 45.14, e: 12.85 },
-      toscana: { s: 42.35, w: 9.68, n: 44.48, e: 12.38 },
-      umbria: { s: 42.35, w: 11.82, n: 43.62, e: 13.27 },
-      marche: { s: 42.72, w: 12.18, n: 43.98, e: 13.92 },
-      lazio: { s: 41.18, w: 11.45, n: 42.85, e: 14.00 },
-      abruzzo: { s: 41.68, w: 13.18, n: 42.92, e: 14.80 },
-      molise: { s: 41.45, w: 14.00, n: 42.08, e: 15.18 },
-      campania: { s: 39.98, w: 13.75, n: 41.52, e: 15.82 },
-      puglia: { s: 39.78, w: 14.93, n: 42.15, e: 18.52 },
-      basilicata: { s: 39.88, w: 15.33, n: 41.15, e: 16.87 },
-      calabria: { s: 37.90, w: 15.62, n: 40.15, e: 17.25 },
-      sicilia: { s: 36.64, w: 12.42, n: 38.32, e: 15.68 },
-      sardegna: { s: 38.85, w: 8.13, n: 41.32, e: 9.85 }
-    };
+    // Confini ISTAT semplificati (static/regions_it.json). Bbox grezze → overlap falso (es. Varzi in ER).
+    let REGION_POLYS = null; // { key: { bbox, polygons: [[[lon,lat],...], ...] } }
+
+    function ringBBox(ring) {
+      let s = Infinity, n = -Infinity, w = Infinity, e = -Infinity;
+      for (let i = 0; i < ring.length; i++) {
+        const lon = ring[i][0], lat = ring[i][1];
+        if (lat < s) s = lat;
+        if (lat > n) n = lat;
+        if (lon < w) w = lon;
+        if (lon > e) e = lon;
+      }
+      return { s, w, n, e };
+    }
+
+    function pointInRing(lat, lon, ring) {
+      let c = false;
+      for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+        const xi = ring[i][0], yi = ring[i][1];
+        const xj = ring[j][0], yj = ring[j][1];
+        if (((yi > lat) !== (yj > lat)) && (lon < (xj - xi) * (lat - yi) / ((yj - yi) || 1e-15) + xi)) c = !c;
+      }
+      return c;
+    }
+
+    function pointInRegion(lat, lon, reg) {
+      const b = reg.bbox;
+      if (lat < b.s || lat > b.n || lon < b.w || lon > b.e) return false;
+      for (let p = 0; p < reg.polygons.length; p++) {
+        const rings = reg.polygons[p];
+        if (!pointInRing(lat, lon, rings[0])) continue;
+        let hole = false;
+        for (let h = 1; h < rings.length; h++) {
+          if (pointInRing(lat, lon, rings[h])) { hole = true; break; }
+        }
+        if (!hole) return true;
+      }
+      return false;
+    }
+
+    async function ensureRegions() {
+      if (REGION_POLYS) return REGION_POLYS;
+      const data = await (await fetch("/regions_it.json")).json();
+      const out = {};
+      (data.features || []).forEach((f) => {
+        const key = f.properties && f.properties.key;
+        if (!key) return;
+        const g = f.geometry;
+        const polys = g.type === "Polygon" ? [g.coordinates]
+          : g.type === "MultiPolygon" ? g.coordinates : [];
+        let s = Infinity, n = -Infinity, w = Infinity, e = -Infinity;
+        polys.forEach((rings) => {
+          const bb = ringBBox(rings[0]);
+          if (bb.s < s) s = bb.s;
+          if (bb.n > n) n = bb.n;
+          if (bb.w < w) w = bb.w;
+          if (bb.e > e) e = bb.e;
+        });
+        out[key] = { bbox: { s, w, n, e }, polygons: polys, name: (f.properties && f.properties.name) || key };
+      });
+      REGION_POLYS = out;
+      return out;
+    }
 
     function bestPool() {
       const key = document.getElementById("region").value;
-      const box = key ? REGIONS[key] : null;
-      const src = box
+      const reg = key && REGION_POLYS ? REGION_POLYS[key] : null;
+      const src = key
         ? (baseCells.length ? baseCells : cells)
         : (detailSheet ? cells : (baseCells.length ? baseCells : cells));
       return src.filter((c) => {
         if ((c.stage || 0) <= 0) return false;
-        if (!box) return true;
-        return c.lat >= box.s && c.lat <= box.n && c.lon >= box.w && c.lon <= box.e;
+        if (!key) return true;
+        if (!reg) return false;
+        return pointInRegion(c.lat, c.lon, reg);
       });
     }
 
-    function paintBestPins() {
+    async function paintBestPins() {
       pins.clearLayers();
       const key = document.getElementById("region").value;
-      const box = key ? REGIONS[key] : null;
       const label = key
         ? (document.getElementById("region").selectedOptions[0].textContent || key)
         : "in vista";
+      try {
+        if (key) await ensureRegions();
+      } catch (_) {
+        say("confini regione non caricati");
+        return;
+      }
+      const reg = key && REGION_POLYS ? REGION_POLYS[key] : null;
       const top = [...bestPool()]
         .sort((a, b) => {
           const ds = (b.stage || 0) - (a.stage || 0);
@@ -430,7 +505,7 @@
         })
         .slice(0, 5);
       if (!top.length) {
-        say(box ? `nessuna zona idonea in ${label}` : "nessuna zona idonea in vista");
+        say(key ? `nessuna zona idonea in ${label}` : "nessuna zona idonea in vista");
         return;
       }
       top.forEach((o, i) => {
@@ -447,13 +522,14 @@
           .on("click", () => openCell(o))
           .addTo(pins);
       });
-      if (box) {
-        map.fitBounds([[box.s, box.w], [box.n, box.e]], { padding: [40, 40], maxZoom: 9 });
+      if (reg) {
+        const b = reg.bbox;
+        map.fitBounds([[b.s, b.w], [b.n, b.e]], { padding: [40, 40], maxZoom: 9 });
       }
       say(`top ${top.length} · ${label}`);
     }
 
-    function showBestZones() {
+    async function showBestZones() {
       bestOn = !bestOn;
       document.getElementById("best").classList.toggle("ghost", !bestOn);
       const regionEl = document.getElementById("region");
@@ -467,7 +543,7 @@
         bulletOn = false;
         document.getElementById("bull").classList.add("ghost");
       }
-      paintBestPins();
+      await paintBestPins();
     }
 
     const BASE_BOX = { s: 36.6, w: 6.6, n: 47.1, e: 18.5 };

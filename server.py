@@ -1,9 +1,9 @@
-#!/usr/bin/env python3
-"""Server loopback. Apre solo 127.0.0.1."""
+"""Server HTTP. Locale: 127.0.0.1 — hosting: 0.0.0.0 via HOST env."""
 
 from __future__ import annotations
 
 import json
+import os
 import threading
 from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlparse
 
 import bulletins
 import forest_er
+import forest_grid
 import forest_lom
 import weather
 from geo import idw_daily, lattice, slope_aspect_twi
@@ -19,7 +20,8 @@ from model import forest_proxy, score_series
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
-PORT = 8765
+PORT = int(os.environ.get("PORT", "8765"))
+HOST = os.environ.get("HOST", "127.0.0.1")
 _lock = threading.Lock()
 
 
@@ -41,6 +43,13 @@ def _today_index(days: list[dict]) -> int:
 
 
 def _forest_at(lat: float, lon: float, elev: float) -> tuple[str, str]:
+    # Griglia compatta (hosting): se c'è il file, non caricare i pickle da 450MB.
+    if forest_grid.exists():
+        forest_grid.warm()
+        g = forest_grid.lookup(lat, lon)
+        if g is not None:
+            return g
+        return forest_proxy(lat, elev)
     hits = []
     for src in (forest_er.lookup(lat, lon), forest_lom.lookup(lat, lon)):
         if src and src[0] != "altro":
@@ -103,6 +112,10 @@ def _feature(
         "host_hit": scored.get("host_hit"),
         "since_rain": today.get("since_rain"),
         "rain26": today.get("rain26"),
+        "vpd": today.get("vpd"),
+        "wind_ms": today.get("wind_ms"),
+        "evap_demand": today.get("evap_demand"),
+        "desiccation": today.get("desiccation"),
     }
     if with_days:
         out["days"] = scored.get("days") or []
@@ -188,6 +201,7 @@ class Handler(BaseHTTPRequestHandler):
                     "needs_refresh": weather.needs_refresh(),
                     "forest_er": forest_er.ready(),
                     "forest_lom": forest_lom.ready(),
+                    "forest_grid": forest_grid.ready(),
                 },
             )
             return
@@ -249,7 +263,12 @@ class Handler(BaseHTTPRequestHandler):
         if not path.resolve().is_relative_to(STATIC.resolve()) or not path.is_file():
             self.send_error(404)
             return
-        kind = "text/html" if path.suffix == ".html" else "text/css" if path.suffix == ".css" else "text/javascript"
+        kind = (
+            "text/html" if path.suffix == ".html"
+            else "application/json" if path.suffix == ".json"
+            else "text/css" if path.suffix == ".css"
+            else "text/javascript"
+        )
         raw = path.read_bytes()
         self.send_response(200)
         self.send_header("Content-Type", kind)
@@ -259,22 +278,35 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    # Carta forestale = ~450MB pickle, ~20s. Non blocca listen: load parallelo in bg.
+    # Griglia compatta (~MB). Se manca e ci sono pickle locali → build una tantum.
     def _forest():
-        import concurrent.futures
+        import os
         import time
 
         t0 = time.perf_counter()
-        print("carico carte forestali in background…", flush=True)
+        build = os.environ.get("PORCINI_BUILD_GRID", "1") not in ("0", "false", "no")
+        print("carta forestale (griglia)…", flush=True)
+        info = forest_grid.ensure(build_if_missing=build)
+        if info.get("ok"):
+            print(
+                f"grid ok: {info.get('cells')} celle, {info.get('bytes', 0)/1e6:.1f}MB, "
+                f"step={info.get('step')} ({time.perf_counter() - t0:.1f}s)",
+                flush=True,
+            )
+            return
+        print(f"grid skip: {info.get('error')} — fallback pickle/proxy", flush=True)
+        # Legacy: pickle in background se presenti
+        import concurrent.futures
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             fer = pool.submit(forest_er.warm)
             flm = pool.submit(forest_lom.warm)
-            n_er = fer.result()
-            n_lom = flm.result()
-        print(
-            f"carte forestali ok: ER {n_er}, Lombardia {n_lom} ({time.perf_counter() - t0:.1f}s)",
-            flush=True,
-        )
+            try:
+                n_er = fer.result()
+                n_lom = flm.result()
+                print(f"pickle ER {n_er}, LOM {n_lom} ({time.perf_counter() - t0:.1f}s)", flush=True)
+            except Exception as exc:
+                print(f"pickle skip: {exc}", flush=True)
 
     threading.Thread(target=_forest, daemon=True, name="forest-warm").start()
 
@@ -303,8 +335,8 @@ def main():
     else:
         print(f"meteo cache ok ({weather.cache_age_hours():.1f}h)", flush=True)
 
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    print(f"porcini heatmap su http://127.0.0.1:{PORT}", flush=True)
+    server = ThreadingHTTPServer((HOST, PORT), Handler)
+    print(f"porcini heatmap su http://{HOST}:{PORT}", flush=True)
     server.serve_forever()
 
 
