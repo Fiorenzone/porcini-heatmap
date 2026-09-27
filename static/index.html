@@ -102,7 +102,10 @@
         padding: 8px 10px; font-size: 13px; border-radius: 10px;
         min-height: 40px; -webkit-tap-highlight-color: transparent;
       }
-      #bar #status { display: none; }
+      #bar #status {
+        display: block; flex: 1 1 100%; order: 10;
+        white-space: normal; font-size: 12px; padding: 4px 6px 2px;
+      }
       #panel {
         top: auto; bottom: 0; left: 0; right: 0; width: auto;
         max-height: min(58vh, 420px); border-radius: 18px 18px 0 0;
@@ -543,6 +546,17 @@
         bulletOn = false;
         document.getElementById("bull").classList.add("ghost");
       }
+      if (!weatherReady || !(baseCells.length || cells.length)) {
+        say("scarico meteo…", true);
+        await refresh(false);
+        if (!(baseCells.length || cells.length)) {
+          say("niente dati — riprova Aggiorna");
+          bestOn = false;
+          document.getElementById("best").classList.add("ghost");
+          regionEl.hidden = true;
+          return;
+        }
+      }
       await paintBestPins();
     }
 
@@ -626,16 +640,74 @@
       timer = setTimeout(() => loadView(true), 800);
     }
 
+    async function waitMeteo(minStations, maxMs) {
+      const t0 = Date.now();
+      let last = 0;
+      while (Date.now() - t0 < maxMs) {
+        try {
+          const s = await (await fetch("/api/status")).json();
+          last = s.stations || 0;
+          if (last >= minStations) return last;
+          if (!s.refresh_busy && last > 0 && Date.now() - t0 > 8000) return last;
+          say(`meteo ${last} stazioni…`, true);
+        } catch (_) {}
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+      return last;
+    }
+
     async function refresh(italy) {
       say("scarico il meteo", true);
-      const res = await fetch("/api/refresh?italy=" + (italy ? "1" : "0"));
-      const data = await res.json();
-      say(res.ok ? "" : "meteo non aggiornato, riprova");
-      if (res.ok) {
-        weatherReady = true;
-        loadView();
+      try {
+        // async=1: Render non timeoutta; salva chunk per chunk
+        const res = await fetch("/api/refresh?async=1&italy=" + (italy ? "1" : "0"));
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          say(data.error || "meteo non aggiornato, riprova");
+          return false;
+        }
+        const n = await waitMeteo(italy ? 80 : 25, italy ? 180000 : 90000);
+        weatherReady = n > 0;
+        say(weatherReady ? `${n} stazioni` : "meteo vuoto — riprova Aggiorna");
+        if (weatherReady) await loadView(false);
+        return weatherReady;
+      } catch (_) {
+        say("rete meteo fallita");
+        return false;
       }
     }
+
+    async function boot() {
+      try {
+        const s = await (await fetch("/api/status")).json();
+        if ((s.stations || 0) > 0) {
+          weatherReady = true;
+          await loadView(false);
+          if (s.stations < 80 || s.needs_refresh) {
+            say("aggiorno meteo…", true);
+            refresh(true);
+          }
+          return;
+        }
+        if (s.refresh_busy) {
+          say("meteo in corso…", true);
+          const n = await waitMeteo(25, 90000);
+          if (n > 0) {
+            weatherReady = true;
+            await loadView(false);
+            refresh(true);
+            return;
+          }
+        }
+        say("primo avvio: scarico meteo…", true);
+        const ok = await refresh(false);
+        if (ok) refresh(true);
+        else say("premi Aggiorna");
+      } catch (_) {
+        say("premi Aggiorna");
+      }
+    }
+    boot();
 
     async function showBulletins() {
       bulletOn = !bulletOn;
@@ -736,29 +808,7 @@
         .catch(() => say("riprova punto"));
     });
     map.on("moveend", maybeRefine);
-    fetch("/api/status").then((r) => r.json()).then(async (s) => {
-      if (s.stations > 0) {
-        weatherReady = true;
-        loadView(false);
-        if (s.stations < 400) {
-          say("completo meteo Italia…", true);
-          try {
-            const res = await fetch("/api/refresh?italy=1");
-            const info = await res.json();
-            if (res.ok && (info.count || 0) > s.stations) {
-              say("");
-              loadView(false);
-            } else {
-              say("copertura nord ok · Aggiorna per sud");
-            }
-          } catch (_) {
-            say("copertura nord ok · Aggiorna per sud");
-          }
-        }
-      } else {
-        say("premi Aggiorna");
-      }
-    });
+    // boot() già avviato sopra
   </script>
 </body>
 </html>

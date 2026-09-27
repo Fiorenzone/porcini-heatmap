@@ -199,6 +199,7 @@ class Handler(BaseHTTPRequestHandler):
                     "weather_age_hours": None if age is None else round(age, 2),
                     "stations": len(weather.stations()),
                     "needs_refresh": weather.needs_refresh(),
+                    "refresh_busy": weather.refresh_busy(),
                     "forest_er": forest_er.ready(),
                     "forest_lom": forest_lom.ready(),
                     "forest_grid": forest_grid.ready(),
@@ -251,9 +252,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/refresh":
             full = q.get("italy", ["0"])[0] == "1"
+            # async=1 (default su hosting): non bloccare HTTP oltre timeout Render
+            async_mode = q.get("async", ["1"])[0] != "0"
+            if async_mode:
+                info = weather.start_refresh_bg(full_italy=full, quick=True)
+                _json(self, 200, info)
+                return
             with _lock:
                 try:
-                    info = weather.refresh(full_italy=full)
+                    info = weather.refresh(full_italy=full, quick=True)
                 except Exception as exc:
                     _json(self, 502, {"error": str(exc)})
                     return
@@ -323,15 +330,8 @@ def main():
     threading.Thread(target=_bull, daemon=True, name="bulletins-warm").start()
 
     if weather.needs_refresh():
-        def _meteo():
-            try:
-                print("aggiorno meteo (cache stale)…", flush=True)
-                info = weather.refresh(full_italy=False)
-                print(f"meteo: {info.get('count')} stazioni", flush=True)
-            except Exception as exc:
-                print(f"meteo skip: {exc}", flush=True)
-
-        threading.Thread(target=_meteo, daemon=True).start()
+        print("avvio meteo background (quick)…", flush=True)
+        weather.start_refresh_bg(full_italy=True, quick=True)
     else:
         print(f"meteo cache ok ({weather.cache_age_hours():.1f}h)", flush=True)
 

@@ -119,15 +119,19 @@ def _fetch(points: list[tuple[float, float]], past_days: int, forecast_days: int
     return out
 
 
-def refresh(full_italy: bool = False, step: float | None = None) -> dict:
+def refresh(full_italy: bool = False, step: float | None = None, *, quick: bool = False) -> dict:
     import time
 
     if step is None:
-        step = 0.45 if full_italy else 0.22
+        if quick:
+            step = 0.55 if full_italy else 0.35
+        else:
+            step = 0.45 if full_italy else 0.22
+    past_days = 20 if quick else 26
+    forecast_days = 7 if quick else 14
     south, west, north, east = ITALY_BOX if full_italy else LOM_ER
     pts = weather_points(south, west, north, east, step)
     old = stations()
-    # se Italia: riusa stazioni già in cache (Lombardia/Emilia) e scarica solo il resto
     kept = []
     need = []
     if full_italy and old:
@@ -141,21 +145,41 @@ def refresh(full_italy: bool = False, step: float | None = None) -> dict:
         need = pts
     stations_out = list(kept)
     failed = 0
+    elev = _load(ELEV, {})
+
+    def _persist():
+        for s in stations_out:
+            if s.get("elev") is not None:
+                elev[f"{s['lat']:.3f},{s['lon']:.3f}"] = s["elev"]
+        data = {
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "full_italy": bool(full_italy and failed == 0 and len(stations_out) > 50),
+            "count": len(stations_out),
+            "stations": stations_out,
+            "failed_chunks": failed,
+            "quick": quick,
+        }
+        _save(CACHE, data)
+        _save(ELEV, elev)
+        return data
+
     for i in range(0, len(need), 25):
         chunk = need[i : i + 25]
         try:
-            stations_out.extend(_fetch(chunk, past_days=26, forecast_days=14))
+            stations_out.extend(_fetch(chunk, past_days=past_days, forecast_days=forecast_days))
         except urllib.error.HTTPError as exc:
             if exc.code != 429:
                 raise
             failed += 1
-            time.sleep(15)
+            time.sleep(8)
             try:
-                stations_out.extend(_fetch(chunk, past_days=26, forecast_days=14))
+                stations_out.extend(_fetch(chunk, past_days=past_days, forecast_days=forecast_days))
             except urllib.error.HTTPError:
                 failed += 1
                 continue
-        time.sleep(1.2)
+        # Salva subito: Render timeout non lascia cache vuota
+        _persist()
+        time.sleep(0.35)
     if len(stations_out) <= len(kept) and full_italy and kept:
         return {
             "count": len(kept),
@@ -165,26 +189,46 @@ def refresh(full_italy: bool = False, step: float | None = None) -> dict:
             "failed_chunks": failed,
             "needed": len(need),
         }
-    elev = _load(ELEV, {})
-    for s in stations_out:
-        if s.get("elev") is not None:
-            elev[f"{s['lat']:.3f},{s['lon']:.3f}"] = s["elev"]
-    data = {
-        "fetched_at": datetime.now(timezone.utc).isoformat(),
-        "full_italy": full_italy and failed == 0,
-        "count": len(stations_out),
-        "stations": stations_out,
-        "failed_chunks": failed,
-    }
-    _save(CACHE, data)
-    _save(ELEV, elev)
+    data = _persist()
     return {
         "count": len(stations_out),
         "fetched_at": data["fetched_at"],
         "full_italy": data["full_italy"],
         "failed_chunks": failed,
         "added": len(stations_out) - len(kept),
+        "quick": quick,
     }
+
+
+_refresh_lock = __import__("threading").Lock()
+_refresh_busy = False
+
+
+def start_refresh_bg(*, full_italy: bool = False, quick: bool = True) -> dict:
+    """Avvia refresh in background (Render: risposta HTTP immediata)."""
+    global _refresh_busy
+    with _refresh_lock:
+        if _refresh_busy:
+            return {"started": False, "busy": True, "count": len(stations())}
+        _refresh_busy = True
+
+    def _run():
+        global _refresh_busy
+        try:
+            refresh(full_italy=False, quick=True)
+            if full_italy:
+                refresh(full_italy=True, quick=True)
+        except Exception as exc:
+            print(f"meteo bg fail: {exc}", flush=True)
+        finally:
+            _refresh_busy = False
+
+    __import__("threading").Thread(target=_run, daemon=True, name="meteo-bg").start()
+    return {"started": True, "busy": True, "count": len(stations())}
+
+
+def refresh_busy() -> bool:
+    return _refresh_busy
 
 
 def _elevation_api(points: list[tuple[float, float]]) -> list[float]:
