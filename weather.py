@@ -27,9 +27,24 @@ DAILY = ",".join(
         "soil_moisture_0_to_7cm_mean",
     ]
 )
+# Quick: meno variabili → risposta Open-Meteo più piccola/veloce (Render outbound lento)
+DAILY_QUICK = ",".join(
+    [
+        "temperature_2m_mean",
+        "precipitation_sum",
+        "et0_fao_evapotranspiration",
+        "relative_humidity_2m_mean",
+        "wind_speed_10m_max",
+        "soil_temperature_0_to_7cm_mean",
+        "soil_moisture_0_to_7cm_mean",
+    ]
+)
 
 LOM_ER = (44.0, 8.4, 46.6, 12.6)
 ITALY_BOX = (36.6, 6.6, 47.1, 18.5)
+
+_LAST_ERROR: str | None = None
+_LAST_OK_AT: str | None = None
 
 
 def _load(path: Path, fallback):
@@ -61,51 +76,87 @@ def needs_refresh(max_hours: float = 6) -> bool:
     return age is None or age >= max_hours
 
 
-def _fetch(points: list[tuple[float, float]], past_days: int, forecast_days: int) -> list[dict]:
+def _fetch(
+    points: list[tuple[float, float]],
+    past_days: int,
+    forecast_days: int,
+    *,
+    daily: str | None = None,
+    timeout: int = 45,
+) -> list[dict]:
     import time
 
+    global _LAST_ERROR, _LAST_OK_AT
     url = "https://api.open-meteo.com/v1/forecast?" + urllib.parse.urlencode(
         {
             "latitude": ",".join(str(p[0]) for p in points),
             "longitude": ",".join(str(p[1]) for p in points),
-            "daily": DAILY,
+            "daily": daily or DAILY,
             "past_days": past_days,
             "forecast_days": forecast_days,
             "timezone": "Europe/Rome",
         }
     )
-    req = urllib.request.Request(url, method="GET")
+    req = urllib.request.Request(
+        url,
+        method="GET",
+        headers={"User-Agent": "porcini-heatmap/render"},
+    )
     last = None
-    for wait in (0, 4, 12, 25):
+    for wait in (0, 2, 5):
         if wait:
             time.sleep(wait)
         try:
-            with urllib.request.urlopen(req, timeout=180) as res:
+            with urllib.request.urlopen(req, timeout=timeout) as res:
                 payload = json.loads(res.read().decode())
+            _LAST_ERROR = None
+            _LAST_OK_AT = datetime.now(timezone.utc).isoformat()
             break
         except urllib.error.HTTPError as exc:
             last = exc
+            _LAST_ERROR = f"HTTP {exc.code}: {exc.reason}"
             if exc.code != 429:
                 raise
+        except Exception as exc:
+            last = exc
+            _LAST_ERROR = f"{type(exc).__name__}: {exc}"
+            continue
     else:
-        raise last
+        raise last if last else RuntimeError("open-meteo fail")
     blocks = payload if isinstance(payload, list) else [payload]
     out = []
     for block in blocks:
-        daily = block["daily"]
+        daily_block = block.get("daily") or {}
+        times = daily_block.get("time") or []
         days = []
-        for i, day in enumerate(daily["time"]):
+        for i, day in enumerate(times):
             days.append(
                 {
                     "date": day,
-                    "tmean": daily["temperature_2m_mean"][i],
-                    "tsoil": daily["soil_temperature_0_to_7cm_mean"][i],
-                    "precip": daily["precipitation_sum"][i],
-                    "rh": daily["relative_humidity_2m_mean"][i],
-                    "et0": daily["et0_fao_evapotranspiration"][i],
-                    "wind": daily["wind_speed_10m_max"][i],
-                    "rad": daily["shortwave_radiation_sum"][i],
-                    "smoist": daily["soil_moisture_0_to_7cm_mean"][i],
+                    "tmean": (daily_block.get("temperature_2m_mean") or [None])[i]
+                    if i < len(daily_block.get("temperature_2m_mean") or [])
+                    else None,
+                    "tsoil": (daily_block.get("soil_temperature_0_to_7cm_mean") or [None])[i]
+                    if i < len(daily_block.get("soil_temperature_0_to_7cm_mean") or [])
+                    else None,
+                    "precip": (daily_block.get("precipitation_sum") or [None])[i]
+                    if i < len(daily_block.get("precipitation_sum") or [])
+                    else None,
+                    "rh": (daily_block.get("relative_humidity_2m_mean") or [None])[i]
+                    if i < len(daily_block.get("relative_humidity_2m_mean") or [])
+                    else None,
+                    "et0": (daily_block.get("et0_fao_evapotranspiration") or [None])[i]
+                    if i < len(daily_block.get("et0_fao_evapotranspiration") or [])
+                    else None,
+                    "wind": (daily_block.get("wind_speed_10m_max") or [None])[i]
+                    if i < len(daily_block.get("wind_speed_10m_max") or [])
+                    else None,
+                    "rad": (daily_block.get("shortwave_radiation_sum") or [None])[i]
+                    if i < len(daily_block.get("shortwave_radiation_sum") or [])
+                    else None,
+                    "smoist": (daily_block.get("soil_moisture_0_to_7cm_mean") or [None])[i]
+                    if i < len(daily_block.get("soil_moisture_0_to_7cm_mean") or [])
+                    else None,
                 }
             )
         out.append(
@@ -119,16 +170,34 @@ def _fetch(points: list[tuple[float, float]], past_days: int, forecast_days: int
     return out
 
 
+def probe() -> dict:
+    """1 punto Open-Meteo — diagnostica networking da Render."""
+    global _LAST_ERROR
+    try:
+        rows = _fetch([(44.5, 10.0)], past_days=3, forecast_days=1, daily=DAILY_QUICK, timeout=20)
+        return {
+            "ok": True,
+            "stations": len(rows),
+            "sample_days": len((rows[0].get("days") or [])),
+            "error": None,
+        }
+    except Exception as exc:
+        _LAST_ERROR = f"{type(exc).__name__}: {exc}"
+        return {"ok": False, "stations": 0, "error": _LAST_ERROR}
+
+
 def refresh(full_italy: bool = False, step: float | None = None, *, quick: bool = False) -> dict:
     import time
 
     if step is None:
         if quick:
-            step = 0.55 if full_italy else 0.35
+            step = 0.65 if full_italy else 0.45
         else:
             step = 0.45 if full_italy else 0.22
-    past_days = 20 if quick else 26
-    forecast_days = 7 if quick else 14
+    past_days = 16 if quick else 26
+    forecast_days = 5 if quick else 14
+    daily_vars = DAILY_QUICK if quick else DAILY
+    chunk_size = 8 if quick else 25
     south, west, north, east = ITALY_BOX if full_italy else LOM_ER
     pts = weather_points(south, west, north, east, step)
     old = stations()
@@ -146,6 +215,7 @@ def refresh(full_italy: bool = False, step: float | None = None, *, quick: bool 
     stations_out = list(kept)
     failed = 0
     elev = _load(ELEV, {})
+    print(f"meteo refresh: {len(need)} punti, chunk={chunk_size}, quick={quick}", flush=True)
 
     def _persist():
         for s in stations_out:
@@ -158,28 +228,45 @@ def refresh(full_italy: bool = False, step: float | None = None, *, quick: bool 
             "stations": stations_out,
             "failed_chunks": failed,
             "quick": quick,
+            "last_error": _LAST_ERROR,
         }
         _save(CACHE, data)
         _save(ELEV, elev)
         return data
 
-    for i in range(0, len(need), 25):
-        chunk = need[i : i + 25]
+    for i in range(0, len(need), chunk_size):
+        chunk = need[i : i + chunk_size]
         try:
-            stations_out.extend(_fetch(chunk, past_days=past_days, forecast_days=forecast_days))
-        except urllib.error.HTTPError as exc:
-            if exc.code != 429:
-                raise
+            stations_out.extend(
+                _fetch(
+                    chunk,
+                    past_days=past_days,
+                    forecast_days=forecast_days,
+                    daily=daily_vars,
+                    timeout=40,
+                )
+            )
+            print(f"meteo chunk ok {len(stations_out)}/{len(need)+len(kept)}", flush=True)
+        except Exception as exc:
             failed += 1
-            time.sleep(8)
+            print(f"meteo chunk fail: {exc}", flush=True)
+            time.sleep(3)
             try:
-                stations_out.extend(_fetch(chunk, past_days=past_days, forecast_days=forecast_days))
-            except urllib.error.HTTPError:
+                stations_out.extend(
+                    _fetch(
+                        chunk,
+                        past_days=past_days,
+                        forecast_days=forecast_days,
+                        daily=daily_vars,
+                        timeout=40,
+                    )
+                )
+            except Exception as exc2:
                 failed += 1
+                print(f"meteo chunk retry fail: {exc2}", flush=True)
                 continue
-        # Salva subito: Render timeout non lascia cache vuota
         _persist()
-        time.sleep(0.35)
+        time.sleep(0.25)
     if len(stations_out) <= len(kept) and full_italy and kept:
         return {
             "count": len(kept),

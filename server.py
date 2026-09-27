@@ -200,11 +200,16 @@ class Handler(BaseHTTPRequestHandler):
                     "stations": len(weather.stations()),
                     "needs_refresh": weather.needs_refresh(),
                     "refresh_busy": weather.refresh_busy(),
+                    "meteo_error": weather._LAST_ERROR,
+                    "meteo_ok_at": weather._LAST_OK_AT,
                     "forest_er": forest_er.ready(),
                     "forest_lom": forest_lom.ready(),
                     "forest_grid": forest_grid.ready(),
                 },
             )
+            return
+        if parsed.path == "/api/meteo/probe":
+            _json(self, 200, weather.probe())
             return
         if parsed.path == "/api/bulletins":
             _json(self, 200, bulletins.fetch_all())
