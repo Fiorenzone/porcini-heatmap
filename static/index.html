@@ -683,26 +683,21 @@
         if ((s.stations || 0) > 0) {
           weatherReady = true;
           await loadView(false);
-          if (s.stations < 80 || s.needs_refresh) {
-            say("aggiorno meteo…", true);
-            refresh(true);
-          }
           return;
         }
         if (s.refresh_busy) {
           say("meteo in corso…", true);
-          const n = await waitMeteo(25, 90000);
+          const n = await waitMeteo(10, 120000);
           if (n > 0) {
             weatherReady = true;
             await loadView(false);
-            refresh(true);
             return;
           }
         }
+        // Un solo refresh (nord). Niente doppia ondata → meno 429.
         say("primo avvio: scarico meteo…", true);
         const ok = await refresh(false);
-        if (ok) refresh(true);
-        else say("premi Aggiorna");
+        if (!ok) say(s.meteo_error || "premi Aggiorna tra un minuto");
       } catch (_) {
         say("premi Aggiorna");
       }

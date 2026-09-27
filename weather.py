@@ -102,9 +102,13 @@ def _fetch(
         method="GET",
         headers={"User-Agent": "porcini-heatmap/render"},
     )
-    last = None
-    for wait in (0, 2, 5):
+    # Backoff su 429: Open-Meteo free punisce burst
+    backoffs = (0, 25, 60, 120)
+    payload = None
+    last: Exception | None = None
+    for attempt, wait in enumerate(backoffs):
         if wait:
+            print(f"meteo wait {wait}s (try {attempt+1})", flush=True)
             time.sleep(wait)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as res:
@@ -117,46 +121,47 @@ def _fetch(
             _LAST_ERROR = f"HTTP {exc.code}: {exc.reason}"
             if exc.code != 429:
                 raise
+            continue
         except Exception as exc:
             last = exc
             _LAST_ERROR = f"{type(exc).__name__}: {exc}"
             continue
-    else:
+    if payload is None:
         raise last if last else RuntimeError("open-meteo fail")
     blocks = payload if isinstance(payload, list) else [payload]
     out = []
     for block in blocks:
         daily_block = block.get("daily") or {}
         times = daily_block.get("time") or []
+        n = len(times)
+
+        def col(name: str):
+            arr = daily_block.get(name) or []
+            return [arr[i] if i < len(arr) else None for i in range(n)]
+
+        tmean, tsoil, precip, rh, et0, wind, rad, smoist = (
+            col("temperature_2m_mean"),
+            col("soil_temperature_0_to_7cm_mean"),
+            col("precipitation_sum"),
+            col("relative_humidity_2m_mean"),
+            col("et0_fao_evapotranspiration"),
+            col("wind_speed_10m_max"),
+            col("shortwave_radiation_sum"),
+            col("soil_moisture_0_to_7cm_mean"),
+        )
         days = []
         for i, day in enumerate(times):
             days.append(
                 {
                     "date": day,
-                    "tmean": (daily_block.get("temperature_2m_mean") or [None])[i]
-                    if i < len(daily_block.get("temperature_2m_mean") or [])
-                    else None,
-                    "tsoil": (daily_block.get("soil_temperature_0_to_7cm_mean") or [None])[i]
-                    if i < len(daily_block.get("soil_temperature_0_to_7cm_mean") or [])
-                    else None,
-                    "precip": (daily_block.get("precipitation_sum") or [None])[i]
-                    if i < len(daily_block.get("precipitation_sum") or [])
-                    else None,
-                    "rh": (daily_block.get("relative_humidity_2m_mean") or [None])[i]
-                    if i < len(daily_block.get("relative_humidity_2m_mean") or [])
-                    else None,
-                    "et0": (daily_block.get("et0_fao_evapotranspiration") or [None])[i]
-                    if i < len(daily_block.get("et0_fao_evapotranspiration") or [])
-                    else None,
-                    "wind": (daily_block.get("wind_speed_10m_max") or [None])[i]
-                    if i < len(daily_block.get("wind_speed_10m_max") or [])
-                    else None,
-                    "rad": (daily_block.get("shortwave_radiation_sum") or [None])[i]
-                    if i < len(daily_block.get("shortwave_radiation_sum") or [])
-                    else None,
-                    "smoist": (daily_block.get("soil_moisture_0_to_7cm_mean") or [None])[i]
-                    if i < len(daily_block.get("soil_moisture_0_to_7cm_mean") or [])
-                    else None,
+                    "tmean": tmean[i],
+                    "tsoil": tsoil[i],
+                    "precip": precip[i],
+                    "rh": rh[i],
+                    "et0": et0[i],
+                    "wind": wind[i],
+                    "rad": rad[i],
+                    "smoist": smoist[i],
                 }
             )
         out.append(
@@ -191,15 +196,19 @@ def refresh(full_italy: bool = False, step: float | None = None, *, quick: bool 
 
     if step is None:
         if quick:
-            step = 0.65 if full_italy else 0.45
+            # Griglia rada: meno call → meno 429 su free tier
+            step = 0.9 if full_italy else 0.55
         else:
             step = 0.45 if full_italy else 0.22
-    past_days = 16 if quick else 26
+    past_days = 14 if quick else 26
     forecast_days = 5 if quick else 14
     daily_vars = DAILY_QUICK if quick else DAILY
-    chunk_size = 8 if quick else 25
+    chunk_size = 4 if quick else 15
     south, west, north, east = ITALY_BOX if full_italy else LOM_ER
     pts = weather_points(south, west, north, east, step)
+    # Cap assoluto punti (Render + Open-Meteo free)
+    if quick and len(pts) > 40:
+        pts = pts[:: max(1, len(pts) // 40)][:40]
     old = stations()
     kept = []
     need = []
@@ -234,7 +243,11 @@ def refresh(full_italy: bool = False, step: float | None = None, *, quick: bool 
         _save(ELEV, elev)
         return data
 
+    hit_429 = False
     for i in range(0, len(need), chunk_size):
+        if hit_429 and failed >= 2:
+            print("meteo stop: troppi 429, tengo cache parziale", flush=True)
+            break
         chunk = need[i : i + chunk_size]
         try:
             stations_out.extend(
@@ -246,11 +259,13 @@ def refresh(full_italy: bool = False, step: float | None = None, *, quick: bool 
                     timeout=40,
                 )
             )
-            print(f"meteo chunk ok {len(stations_out)}/{len(need)+len(kept)}", flush=True)
+            print(f"meteo chunk ok {len(stations_out)}", flush=True)
         except Exception as exc:
             failed += 1
+            if "429" in str(exc) or (getattr(exc, "code", None) == 429):
+                hit_429 = True
             print(f"meteo chunk fail: {exc}", flush=True)
-            time.sleep(3)
+            time.sleep(15)
             try:
                 stations_out.extend(
                     _fetch(
@@ -263,10 +278,12 @@ def refresh(full_italy: bool = False, step: float | None = None, *, quick: bool 
                 )
             except Exception as exc2:
                 failed += 1
+                if "429" in str(exc2) or (getattr(exc2, "code", None) == 429):
+                    hit_429 = True
                 print(f"meteo chunk retry fail: {exc2}", flush=True)
                 continue
         _persist()
-        time.sleep(0.25)
+        time.sleep(1.5 if quick else 0.8)
     if len(stations_out) <= len(kept) and full_italy and kept:
         return {
             "count": len(kept),
@@ -297,13 +314,22 @@ def start_refresh_bg(*, full_italy: bool = False, quick: bool = True) -> dict:
     with _refresh_lock:
         if _refresh_busy:
             return {"started": False, "busy": True, "count": len(stations())}
+        # Se abbiamo già stazioni fresche, non martellare Open-Meteo
+        n = len(stations())
+        age = cache_age_hours()
+        if n >= 15 and age is not None and age < 3:
+            return {"started": False, "busy": False, "count": n, "skipped": "cache fresca"}
         _refresh_busy = True
 
     def _run():
         global _refresh_busy
         try:
+            # Una sola passata rada (nord). Italia intera solo se chiesto E nord ok.
             refresh(full_italy=False, quick=True)
-            if full_italy:
+            if full_italy and len(stations()) >= 8:
+                import time
+
+                time.sleep(20)  # pausa anti-429 prima della 2ª ondata
                 refresh(full_italy=True, quick=True)
         except Exception as exc:
             print(f"meteo bg fail: {exc}", flush=True)

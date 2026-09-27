@@ -335,8 +335,9 @@ def main():
     threading.Thread(target=_bull, daemon=True, name="bulletins-warm").start()
 
     if weather.needs_refresh():
-        print("avvio meteo background (quick)…", flush=True)
-        weather.start_refresh_bg(full_italy=True, quick=True)
+        print("avvio meteo background (quick nord)…", flush=True)
+        # Solo nord al boot — Italia dopo, da UI, per non prendere 429
+        weather.start_refresh_bg(full_italy=False, quick=True)
     else:
         print(f"meteo cache ok ({weather.cache_age_hours():.1f}h)", flush=True)
 
