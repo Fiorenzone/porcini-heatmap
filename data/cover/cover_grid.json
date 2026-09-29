@@ -1,0 +1,45 @@
+{
+  "south": 43.55,
+  "west": 8.35,
+  "north": 46.754999999999995,
+  "east": 13.055,
+  "step": 0.005,
+  "nrows": 641,
+  "ncols": 941,
+  "classes": {
+    "0": "non in carta",
+    "1": "bosco denso o fustaia",
+    "2": "ceduo denso",
+    "3": "bosco rado",
+    "4": "castagneto da frutto",
+    "5": "formazione ripariale",
+    "6": "rimboschimento o arbusteto"
+  },
+  "counts": {
+    "before": [
+      542706,
+      31927,
+      20124,
+      512,
+      221,
+      1384,
+      6307
+    ],
+    "after": {
+      "0": 542706,
+      "1": 31927,
+      "2": 20124,
+      "3": 512,
+      "4": 221,
+      "5": 1384,
+      "6": 6307
+    }
+  },
+  "source_note": "DUSAF 7 Lombardia + uso suolo ER 2023 sulle celle vuote",
+  "sources": [
+    "Regione Lombardia, DUSAF 7.0 Uso e copertura del suolo 2021. Ceduo, fustaia, densità, ripariali, rimboschimenti.",
+    "Regione Emilia-Romagna, Uso del suolo di dettaglio 2023. Solo celle fuori dal DUSAF."
+  ],
+  "bytes": 603229,
+  "encoding": "uint8 class; 0=outside DUSAF forest"
+}

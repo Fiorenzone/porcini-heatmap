@@ -12,6 +12,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY *.py ./
 COPY static ./static
 COPY data/forest/forest_grid.bin data/forest/forest_grid.json ./data/forest/
+COPY data/soil/soil_grid.bin data/soil/soil_grid.json data/soil/jja_heat.json ./data/soil/
+COPY data/cover/cover_grid.bin data/cover/cover_grid.json ./data/cover/
+COPY data/arpa/erg5_cells.csv ./data/arpa/
 # cache dir vuota; meteo/bollettini al primo boot
 RUN mkdir -p data/cache
 

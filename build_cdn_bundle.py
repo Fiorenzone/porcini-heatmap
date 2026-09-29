@@ -24,7 +24,11 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 import bulletins
+import arpa_rain
+import soil_heat
+import cover_grid
 import forest_grid
+import soil_grid
 import weather
 from geo import idw_daily, in_italy, slope_aspect_twi
 from model import forest_proxy, score_series
@@ -109,17 +113,28 @@ def _pack_cell(elev, leaf_code: int, by_sp: list[tuple[int, int]]) -> bytes:
     return b"".join(parts)
 
 
-def build(*, skip_meteo: bool = False) -> dict:
+def build(*, skip_meteo: bool = False, skip_obs: bool = False) -> dict:
     t0 = time.perf_counter()
     OUT.mkdir(parents=True, exist_ok=True)
     step = _step()
     south, west, north, east = ITALY
 
     forest_grid.warm()
+    soil_grid.warm()
+    cover_grid.warm()
+    if not skip_obs:
+        try:
+            print(f"arpa: {arpa_rain.refresh(force=True)}", flush=True)
+        except Exception as exc:
+            print(f"arpa skip: {exc}", flush=True)
+        try:
+            print(f"suolo JJA: {soil_heat.refresh(force=True)}", flush=True)
+        except Exception as exc:
+            print(f"suolo JJA skip: {exc}", flush=True)
 
     if not skip_meteo or not weather.stations():
         print("meteo refresh Italia…", flush=True)
-        info = weather.refresh(full_italy=True, step=0.45, quick=False)
+        info = weather.refresh(full_italy=True, step=0.45, quick=False, force=True)
         print(f"meteo: {info}", flush=True)
     else:
         print(f"meteo cache: {len(weather.stations())} stazioni", flush=True)
@@ -176,6 +191,12 @@ def build(*, skip_meteo: bool = False) -> dict:
                 buf.extend(_pack_cell(z, LEAF_CODE.get(leaf, 1), [(0, 0)] * 4))
                 continue
             label = leaf_note.split(": ")[-1] if leaf_note.startswith("Carta forestale") else None
+            series, _arpa_days = arpa_rain.overlay(lat, lon, series)
+            soil_hit = soil_grid.lookup(lat, lon) if soil_grid.exists() else None
+            soil = 0 if soil_hit is None else soil_hit[0]
+            cover_hit = cover_grid.lookup(lat, lon) if cover_grid.exists() else None
+            cover = 0 if cover_hit is None else cover_hit[0]
+            heat = soil_heat.lookup(lat, lon)
             ti = _today_index(series)
             by = []
             for sp in SPECIES:
@@ -190,6 +211,9 @@ def build(*, skip_meteo: bool = False) -> dict:
                     month=month,
                     today_index=ti,
                     label=label,
+                    soil=soil,
+                    cover=cover,
+                    heat=heat,
                 )
                 today = scored.get("today") or {}
                 stage = int(scored.get("stage") or 0)

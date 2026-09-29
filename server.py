@@ -12,7 +12,11 @@ from urllib.parse import parse_qs, urlparse
 
 import bulletins
 import forest_er
+import arpa_rain
+import cover_grid
 import forest_grid
+import soil_grid
+import soil_heat
 import forest_lom
 import weather
 from geo import idw_daily, lattice, slope_aspect_twi
@@ -43,6 +47,26 @@ def _today_index(days: list[dict]) -> int:
         if d["date"] >= today:
             return max(0, i - 1) if d["date"] > today else i
     return len(days) - 1
+
+
+def _cover_at(lat: float, lon: float) -> tuple[int, str]:
+    if not cover_grid.exists():
+        return 0, "carta struttura assente"
+    cover_grid.warm()
+    hit = cover_grid.lookup(lat, lon)
+    if hit is None:
+        return 0, "fuori carta struttura"
+    return hit
+
+
+def _soil_at(lat: float, lon: float) -> tuple[int, str]:
+    if not soil_grid.exists():
+        return 0, "carta suoli assente"
+    soil_grid.warm()
+    hit = soil_grid.lookup(lat, lon)
+    if hit is None:
+        return 0, "fuori carta suoli"
+    return hit
 
 
 def _forest_at(lat: float, lon: float, elev: float) -> tuple[str, str]:
@@ -78,6 +102,13 @@ def _scored_slice(scored: dict) -> dict:
         "habitat": scored.get("habitat"),
         "host": scored.get("host"),
         "host_hit": scored.get("host_hit"),
+        "soil": scored.get("soil") or 0,
+        "soil_factor": scored.get("soil_factor"),
+        "cover": scored.get("cover") or 0,
+        "cover_factor": scored.get("cover_factor"),
+        "heat": scored.get("heat"),
+        "heat_factor": scored.get("heat_factor"),
+        "dry_wind": today.get("dry_wind"),
         "since_rain": today.get("since_rain"),
         "rain26": today.get("rain26"),
         "vpd": today.get("vpd"),
@@ -104,6 +135,10 @@ def _feature(
     if not series:
         return None
     label = leaf_note.split(": ")[-1] if leaf_note.startswith("Carta forestale") else None
+    series, arpa_days = arpa_rain.overlay(lat, lon, series)
+    soil, soil_note = _soil_at(lat, lon)
+    cover, cover_note = _cover_at(lat, lon)
+    heat = soil_heat.lookup(lat, lon)
     scored = score_series(
         series,
         species=species,
@@ -115,6 +150,9 @@ def _feature(
         month=month,
         today_index=_today_index(series),
         label=label,
+        soil=soil,
+        cover=cover,
+        heat=heat,
     )
     out = {
         "lat": round(lat, 4),
@@ -125,6 +163,9 @@ def _feature(
         "twi": twi,
         "leaf": leaf,
         "leaf_note": leaf_note,
+        "soil_note": soil_note,
+        "cover_note": cover_note,
+        "arpa_days": arpa_days,
         **_scored_slice(scored),
     }
     if with_days:
@@ -171,6 +212,10 @@ def viewport(south, west, north, east, species: str, with_days: bool = False) ->
         if not series:
             continue
         label = leaf_note.split(": ")[-1] if leaf_note.startswith("Carta forestale") else None
+        series, arpa_days = arpa_rain.overlay(lat, lon, series)
+        soil, soil_note = _soil_at(lat, lon)
+        cover, cover_note = _cover_at(lat, lon)
+        heat = soil_heat.lookup(lat, lon)
         ti = _today_index(series)
         base = {
             "lat": round(lat, 4),
@@ -181,6 +226,11 @@ def viewport(south, west, north, east, species: str, with_days: bool = False) ->
             "twi": twi,
             "leaf": leaf,
             "leaf_note": leaf_note,
+            "soil": soil,
+            "soil_note": soil_note,
+            "cover": cover,
+            "cover_note": cover_note,
+            "arpa_days": arpa_days,
         }
         if all_species:
             by = {}
@@ -196,6 +246,9 @@ def viewport(south, west, north, east, species: str, with_days: bool = False) ->
                     month=month,
                     today_index=ti,
                     label=label,
+                    soil=soil,
+                    cover=cover,
+                    heat=heat,
                 )
                 by[sp] = _scored_slice(scored)
             features.append({**base, "by": by})
@@ -211,6 +264,9 @@ def viewport(south, west, north, east, species: str, with_days: bool = False) ->
                 month=month,
                 today_index=ti,
                 label=label,
+                soil=soil,
+                cover=cover,
+                heat=heat,
             )
             feat = {**base, **_scored_slice(scored)}
             if with_days:
@@ -288,12 +344,19 @@ class Handler(BaseHTTPRequestHandler):
                     "weather_age_hours": None if age is None else round(age, 2),
                     "stations": len(weather.stations()),
                     "needs_refresh": weather.needs_refresh(),
-                    "refresh_busy": weather.refresh_busy(),
+                    "refresh_busy": weather.refresh_busy() or _CALC_BUSY,
+                    "server_calc": _server_calc(),
+                    "calc_busy": _CALC_BUSY,
+                    "calc_phase": _CALC_PHASE,
+                    "calc_error": _CALC_ERROR,
                     "meteo_error": weather._LAST_ERROR,
                     "meteo_ok_at": weather._LAST_OK_AT,
                     "forest_er": forest_er.ready(),
                     "forest_lom": forest_lom.ready(),
                     "forest_grid": forest_grid.ready(),
+                    "soil_grid": soil_grid.ready(),
+                    "cover_grid": cover_grid.ready(),
+                    "arpa_rain": arpa_rain.warm(),
                 },
             )
             return
@@ -349,7 +412,10 @@ class Handler(BaseHTTPRequestHandler):
             _json(self, 200, cell_detail(lat, lon, species))
             return
         if parsed.path == "/api/refresh":
-            # Non chiamare Open-Meteo da qui: l'IP di Render è in 429.
+            if _server_calc():
+                _json(self, 200, start_local_calc())
+                return
+            # Render: Open-Meteo dal browser. L'IP del free tier è in 429.
             _json(self, 200, {"client": True, **weather.client_plan(full_italy=True)})
             return
         path = STATIC / ("index.html" if parsed.path in ("/", "") else parsed.path.lstrip("/"))
@@ -394,6 +460,61 @@ class Handler(BaseHTTPRequestHandler):
         _json(self, code, info)
 
 
+_CALC_BUSY = False
+_CALC_PHASE = ""
+_CALC_ERROR: str | None = None
+_calc_lock = threading.Lock()
+
+
+def _server_calc() -> bool:
+    """Locale: il server scarica meteo. Render (PORCINI_BUILD_GRID=0) no."""
+    return os.environ.get("PORCINI_BUILD_GRID", "1") not in ("0", "false", "no")
+
+
+def start_local_calc() -> dict:
+    """Meteo Italia, pioggia ARPA, calore estivo. Un giro alla volta."""
+    global _CALC_BUSY
+    if not _server_calc():
+        return {"started": False, "server": False}
+    with _calc_lock:
+        if _CALC_BUSY:
+            return {"started": False, "busy": True, "phase": _CALC_PHASE}
+        _CALC_BUSY = True
+
+    def run() -> None:
+        global _CALC_BUSY, _CALC_PHASE, _CALC_ERROR
+        try:
+            _CALC_PHASE = "meteo"
+            print("calcolo: meteo Italia", flush=True)
+            weather.refresh(full_italy=True, quick=False, force=True)
+            _CALC_PHASE = "arpa"
+            print("calcolo: pioggia ARPA", flush=True)
+            arpa_rain.refresh(force=True)
+            _CALC_PHASE = "suolo"
+            print("calcolo: calore estivo suolo", flush=True)
+            soil_heat.refresh(force=True)
+            _CALC_PHASE = "mappa"
+            print("calcolo: griglia fissa", flush=True)
+            import build_cdn_bundle
+
+            build_cdn_bundle.build(skip_meteo=True, skip_obs=True)
+            with _viewport_lock:
+                _viewport_cache.clear()
+            _CALC_ERROR = None
+            _CALC_PHASE = ""
+            print(f"calcolo fatto: {len(weather.stations())} stazioni", flush=True)
+        except (Exception, SystemExit) as exc:
+            _CALC_ERROR = str(exc)
+            _CALC_PHASE = ""
+            print(f"calcolo fail: {exc}", flush=True)
+        finally:
+            with _calc_lock:
+                _CALC_BUSY = False
+
+    threading.Thread(target=run, daemon=True, name="local-calc").start()
+    return {"started": True, "busy": True}
+
+
 def main():
     # Griglia compatta (~MB). Se manca e ci sono pickle locali → build una tantum.
     def _forest():
@@ -424,6 +545,22 @@ def main():
                 print(f"pickle ER {n_er}, LOM {n_lom} ({time.perf_counter() - t0:.1f}s)", flush=True)
             except Exception as exc:
                 print(f"pickle skip: {exc}", flush=True)
+
+    soil = soil_grid.warm()
+    if soil.get("ok"):
+        print(f"suoli ok: {soil.get('bytes', 0)/1e6:.1f}MB step={soil.get('step')}", flush=True)
+    else:
+        print(f"suoli skip: {soil.get('error')}", flush=True)
+    cover = cover_grid.warm()
+    if cover.get("ok"):
+        print(f"struttura ok: {cover.get('bytes', 0)/1e6:.1f}MB", flush=True)
+    else:
+        print(f"struttura skip: {cover.get('error')}", flush=True)
+    if _server_calc():
+        print("calcolo all'avvio…", flush=True)
+        start_local_calc()
+    else:
+        arpa_rain.start_bg()
 
     threading.Thread(target=_forest, daemon=True, name="forest-warm").start()
 

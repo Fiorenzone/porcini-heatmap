@@ -170,7 +170,7 @@ def idw_daily(stations: list[dict], lat: float, lon: float, k: int = 4, max_deg:
     wsum = sum(weights)
     base = ranked[0]["days"]
     merged = []
-    keys = ("tmean", "tsoil", "precip", "rh", "et0", "wind", "rad", "smoist")
+    keys = ("tmean", "tsoil", "precip", "rh", "et0", "wind", "gust", "rad", "smoist")
     for i in range(len(base)):
         row = {"date": base[i]["date"]}
         for key in keys:
@@ -185,5 +185,17 @@ def idw_daily(stations: list[dict], lat: float, lon: float, k: int = 4, max_deg:
                 acc += w * val
                 ww += w
             row[key] = None if ww == 0 else acc / ww
+        sx = sy = ww = 0.0
+        for s, w in zip(ranked, weights):
+            if i >= len(s["days"]):
+                continue
+            ang = s["days"][i].get("wdir")
+            if ang is None:
+                continue
+            rad = math.radians(float(ang))
+            sx += w * math.sin(rad)
+            sy += w * math.cos(rad)
+            ww += w
+        row["wdir"] = None if ww == 0 else (math.degrees(math.atan2(sx, sy)) + 360.0) % 360.0
         merged.append(row)
     return merged

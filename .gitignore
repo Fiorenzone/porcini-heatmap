@@ -29,5 +29,11 @@ data/bulletins/
 !data/forest/forest_grid.bin
 !data/forest/forest_grid.json
 
+# Carta suoli: shapefile e json ArcGIS restano locali. La griglia compatta va in repo.
+data/soil/_src/
+data/cover/_src/
+!data/soil/soil_grid.bin
+!data/soil/soil_grid.json
+
 # Bundle CDN (generato da Actions / build_cdn_bundle.py)
 static/data/

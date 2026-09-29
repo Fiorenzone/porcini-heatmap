@@ -80,10 +80,12 @@
     const rows = Math.max(1, r1 - r0 + 1);
     const cols = Math.max(1, c1 - c0 + 1);
     let stride = 1;
-    while ((rows / stride) * (cols / stride) > maxPts) stride += 1;
+    while ((rows / stride) * (cols / stride) > maxPts) stride *= 2;
     const out = [];
-    for (let r = r0; r <= r1; r += stride) {
-      for (let c = c0; c <= c1; c += stride) {
+    const rStart = r0 + ((stride - (r0 % stride)) % stride);
+    const cStart = c0 + ((stride - (c0 % stride)) % stride);
+    for (let r = rStart; r <= r1; r += stride) {
+      for (let c = cStart; c <= c1; c += stride) {
         const cell = cellAt(grid, r, c);
         if (!cell) continue;
         const v = cell.by[species] || { stage: 0, p: 0 };

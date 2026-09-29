@@ -6,19 +6,6 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths:
-      - "build_cdn_bundle.py"
-      - "model.py"
-      - "geo.py"
-      - "weather.py"
-      - "bulletins.py"
-      - "forest_grid.py"
-      - "server.py"
-      - "geoticket_dump.py"
-      - "static/**"
-      - "data/forest/forest_grid.bin"
-      - "data/forest/forest_grid.json"
-      - ".github/workflows/cdn.yml"
 
 permissions:
   contents: read

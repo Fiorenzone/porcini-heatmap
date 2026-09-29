@@ -22,6 +22,8 @@ DAILY = ",".join(
         "et0_fao_evapotranspiration",
         "relative_humidity_2m_mean",
         "wind_speed_10m_max",
+        "wind_direction_10m_dominant",
+        "wind_gusts_10m_max",
         "shortwave_radiation_sum",
         "soil_temperature_0_to_7cm_mean",
         "soil_moisture_0_to_7cm_mean",
@@ -35,6 +37,8 @@ DAILY_QUICK = ",".join(
         "et0_fao_evapotranspiration",
         "relative_humidity_2m_mean",
         "wind_speed_10m_max",
+        "wind_direction_10m_dominant",
+        "wind_gusts_10m_max",
         "soil_temperature_0_to_7cm_mean",
         "soil_moisture_0_to_7cm_mean",
     ]
@@ -139,13 +143,15 @@ def _fetch(
             arr = daily_block.get(name) or []
             return [arr[i] if i < len(arr) else None for i in range(n)]
 
-        tmean, tsoil, precip, rh, et0, wind, rad, smoist = (
+        tmean, tsoil, precip, rh, et0, wind, wdir, gust, rad, smoist = (
             col("temperature_2m_mean"),
             col("soil_temperature_0_to_7cm_mean"),
             col("precipitation_sum"),
             col("relative_humidity_2m_mean"),
             col("et0_fao_evapotranspiration"),
             col("wind_speed_10m_max"),
+            col("wind_direction_10m_dominant"),
+            col("wind_gusts_10m_max"),
             col("shortwave_radiation_sum"),
             col("soil_moisture_0_to_7cm_mean"),
         )
@@ -160,6 +166,8 @@ def _fetch(
                     "rh": rh[i],
                     "et0": et0[i],
                     "wind": wind[i],
+                    "wdir": wdir[i],
+                    "gust": gust[i],
                     "rad": rad[i],
                     "smoist": smoist[i],
                 }
@@ -191,7 +199,7 @@ def client_plan(*, full_italy: bool = True) -> dict:
     }
 
 
-_DAY_KEYS = ("date", "tmean", "tsoil", "precip", "rh", "et0", "wind", "rad", "smoist")
+_DAY_KEYS = ("date", "tmean", "tsoil", "precip", "rh", "et0", "wind", "wdir", "gust", "rad", "smoist")
 
 
 def ingest(rows: list, *, full_italy: bool = True) -> dict:
@@ -266,7 +274,7 @@ def probe() -> dict:
         return {"ok": False, "stations": 0, "error": _LAST_ERROR}
 
 
-def refresh(full_italy: bool = False, step: float | None = None, *, quick: bool = False) -> dict:
+def refresh(full_italy: bool = False, step: float | None = None, *, quick: bool = False, force: bool = False) -> dict:
     import time
 
     if step is None:
@@ -284,7 +292,7 @@ def refresh(full_italy: bool = False, step: float | None = None, *, quick: bool 
     # Cap assoluto punti (Render + Open-Meteo free)
     if quick and len(pts) > 40:
         pts = pts[:: max(1, len(pts) // 40)][:40]
-    old = stations()
+    old = [] if force else stations()
     kept = []
     need = []
     if full_italy and old:

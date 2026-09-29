@@ -92,6 +92,31 @@
     .verdict.vicino strong { color: #a16207; }
     .verdict.assente, .verdict.neutro { background: rgba(20,17,14,.04); }
     .verdict a { color: inherit; font-weight: 600; }
+    .leaflet-bottom.leaflet-right { margin: 0 16px 18px 0 !important; }
+    .leaflet-control-scale { margin: 0 0 4px 0 !important; }
+    .leaflet-control-scale-line {
+      background: rgba(255,255,255,.86) !important;
+      backdrop-filter: blur(16px) saturate(1.3);
+      -webkit-backdrop-filter: blur(16px) saturate(1.3);
+      border: 1.5px solid #14110e !important;
+      border-top: none !important;
+      border-radius: 0 0 7px 7px;
+      box-shadow: 0 1px 2px rgba(0,0,0,.06), 0 8px 18px -10px rgba(0,0,0,.35);
+      color: #14110e !important;
+      font: 600 11px/1.15 ui-sans-serif, system-ui, sans-serif !important;
+      letter-spacing: .03em;
+      padding: 3px 0 4px !important;
+      text-align: center;
+      text-shadow: none !important;
+      box-sizing: border-box;
+    }
+    .leaflet-control-attribution {
+      background: transparent !important;
+      color: var(--dim) !important;
+      font-size: 10px !important;
+      margin-top: 2px !important;
+    }
+    .leaflet-control-attribution a { color: var(--dim) !important; }
     @media (max-width: 620px) {
       #legend { display: none; }
       #bar {
@@ -114,6 +139,7 @@
       .word { font-size: 26px; }
       .chip { font-size: 11px; }
       .leaflet-control-zoom { margin-bottom: 12px !important; }
+      .leaflet-bottom.leaflet-right { margin-bottom: 10px !important; }
     }
     @media (max-width: 420px) {
       #bar #refresh { display: none; }
@@ -152,6 +178,7 @@
     L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
       attribution: "&copy; OpenStreetMap", maxZoom: 16
     }).addTo(map);
+    L.control.scale({ imperial: false, metric: true, maxWidth: 120, position: "bottomright" }).addTo(map);
     const bestShapes = L.layerGroup().addTo(map);
     const pins = L.layerGroup().addTo(map);
     let baseSheet = null;
@@ -419,7 +446,11 @@
       const box = document.getElementById("advanced");
       box.style.display = "block";
       if (CDN) {
-        box.innerHTML = `<p class="sub">Dettaglio giornaliero sul CDN arriva col prossimo ciclo meteo. Ora: stadio ${c.stage}/5 · ${Math.round((c.p || 0) * 100)}% · ${Math.round(c.elev || 0)} m · ${c.leaf || ""}.</p>`;
+        const brief = `<p class="sub">Dettaglio giornaliero sul CDN arriva col prossimo ciclo meteo. Ora: stadio ${c.stage}/5 · ${Math.round((c.p || 0) * 100)}% · ${Math.round(c.elev || 0)} m · ${c.leaf || ""}.</p>`;
+        fetch(`/api/cell?lat=${c.lat}&lon=${c.lon}&species=${document.getElementById("species").value}`)
+          .then((r) => { if (!r.ok) throw new Error("no api"); return r.json(); })
+          .then((d) => { if (d.error) throw new Error(d.error); renderDetail(d, box); })
+          .catch(() => { box.innerHTML = brief; });
         return;
       }
       if (c.days && c.days.length) {
@@ -449,6 +480,10 @@
         <table>
           <tr><td>Bosco</td><td>${(d.leaf_note || "").split(": ").pop()}</td></tr>
           <tr><td>Ospite</td><td>${hostLabel(d.host_hit)}</td></tr>
+          <tr><td>Suolo</td><td>${d.soil_note || "n.d."}${d.soil_factor != null && d.soil_factor < 0.999 ? " · ×" + Number(d.soil_factor).toFixed(2) : ""}</td></tr>
+          <tr><td>Struttura</td><td>${d.cover_note || "n.d."}${d.cover_factor != null && d.cover_factor < 0.999 ? " · ×" + Number(d.cover_factor).toFixed(2) : ""}</td></tr>
+          <tr><td>Pioggia osservata</td><td>${d.arpa_days ? d.arpa_days + " giorni ARPA, il resto Open-Meteo" : "Open-Meteo"}</td></tr>
+          <tr><td>Calore estivo suolo</td><td>${d.heat_factor == null ? "non misurato" : (d.heat_factor < 0.999 ? "×" + Number(d.heat_factor).toFixed(2) + (d.heat != null ? " · " + Number(d.heat).toFixed(1) + " °C vs estati precedenti" : "") : "in linea")}</td></tr>
           <tr><td>Quota</td><td>${Math.round(d.elev)} m</td></tr>
           <tr><td>Pendenza</td><td>${d.slope}°</td></tr>
           <tr><td>Esposizione</td><td>${d.aspect}°</td></tr>
@@ -461,7 +496,7 @@
           <tr><td>Temperatura suolo</td><td>${d.t ?? "n.d."} °C</td></tr>
           <tr><td>Pioggia 26 giorni</td><td>${Math.round(d.rain26 || 0)} mm</td></tr>
           <tr><td>VPD aria</td><td>${d.vpd != null ? d.vpd.toFixed(2) + " kPa" : "n.d."}</td></tr>
-          <tr><td>Vento sottobosco</td><td>${d.wind_ms != null ? d.wind_ms.toFixed(1) + " m/s" : "n.d."}</td></tr>
+          <tr><td>Vento sottobosco</td><td>${d.wind_ms != null ? d.wind_ms.toFixed(1) + " m/s" : "n.d."}${d.dry_wind != null && d.dry_wind >= 0.66 ? " · settore secco" : ""}</td></tr>
           <tr><td>Fattore desiccazione</td><td>${d.desiccation != null ? "×" + d.desiccation.toFixed(2) : "n.d."}</td></tr>
           <tr><td>Un anno fa</td><td>${year}</td></tr>
         </table>`;
@@ -544,27 +579,29 @@
       return null;
     }
 
+    function byRank(a, b) {
+      const ds = (b.stage || 0) - (a.stage || 0);
+      if (ds) return ds;
+      const dp = (b.p || 0) - (a.p || 0);
+      if (dp) return dp;
+      if (a.lat !== b.lat) return a.lat - b.lat;
+      return a.lon - b.lon;
+    }
+
     function rankRegion(key) {
       const reg = REGION_POLYS && REGION_POLYS[key];
       if (!reg) return [];
       if (CDN && CDN.grid) {
         const sp = document.getElementById("species").value;
         return PorciniHeat.cellsInRegion(CDN.grid, sp, pointInRegion, reg)
-          .sort((a, b) => {
-            const ds = (b.stage || 0) - (a.stage || 0);
-            if (ds) return ds;
-            return (b.p || 0) - (a.p || 0);
-          })
+          .sort(byRank)
           .slice(0, 5);
       }
-      const src = baseCells.length ? baseCells : cells;
+      const sp2 = document.getElementById("species").value;
+      const src = flattenCells(baseBundle.length ? baseBundle : (baseCells.length ? baseCells : cells), sp2);
       return src
         .filter((c) => (c.stage || 0) > 0 && pointInRegion(c.lat, c.lon, reg))
-        .sort((a, b) => {
-          const ds = (b.stage || 0) - (a.stage || 0);
-          if (ds) return ds;
-          return (b.p || 0) - (a.p || 0);
-        })
+        .sort(byRank)
         .slice(0, 5);
     }
 
@@ -806,13 +843,13 @@
 
     function maybeRefine() {
       if (!weatherReady || !baseCover) return;
+      if (!(CDN && CDN.grid)) return;
       if (map.getZoom() < baseZoom + 2) {
         clearTimeout(timer);
         dropDetail();
         return;
       }
       clearTimeout(timer);
-      say("dettaglio zona", true);
       timer = setTimeout(() => loadView(true), 800);
     }
 
@@ -825,6 +862,8 @@
         ["rh", "relative_humidity_2m_mean"],
         ["et0", "et0_fao_evapotranspiration"],
         ["wind", "wind_speed_10m_max"],
+        ["wdir", "wind_direction_10m_dominant"],
+        ["gust", "wind_gusts_10m_max"],
         ["rad", "shortwave_radiation_sum"],
         ["smoist", "soil_moisture_0_to_7cm_mean"]
       ];
@@ -874,7 +913,45 @@
       return true;
     }
 
+    async function serverStatus() {
+      try {
+        const res = await fetch("/api/status");
+        if (!res.ok) return null;
+        return await res.json();
+      } catch (_) {
+        return null;
+      }
+    }
+
+    async function waitCalc() {
+      let s = await serverStatus();
+      while (s && s.calc_busy) {
+        say(s.calc_phase ? `ricalcolo ${s.calc_phase}…` : "ricalcolo…", true);
+        await new Promise((r) => setTimeout(r, 2000));
+        s = await serverStatus();
+      }
+      return s;
+    }
+
     async function refresh() {
+      const live = await serverStatus();
+      if (live && live.server_calc) {
+        say("ricalcolo…", true);
+        await fetch("/api/refresh");
+        const done = await waitCalc();
+        weatherReady = !!done && (done.stations || 0) > 0;
+        if (!weatherReady) {
+          say(done && done.calc_error ? done.calc_error : "meteo non pronto");
+          return false;
+        }
+        await loadCdn();
+        if (bestOn && bestRegions.size) {
+          const keys = [...bestRegions.keys()];
+          clearBest();
+          keys.forEach(addRegion);
+        }
+        return true;
+      }
       try {
         const probe = await fetch(ASSET_BASE + "data/meta.json", { cache: "no-cache" });
         if (probe.ok || CDN) {
@@ -944,6 +1021,16 @@
     }
 
     async function boot() {
+      const live = await serverStatus();
+      if (live && live.server_calc) {
+        const done = await waitCalc();
+        if (done && (done.stations || 0) > 0) {
+          await loadCdn();
+          return;
+        }
+        say(done && done.calc_error ? done.calc_error : "meteo non pronto — premi Aggiorna");
+        return;
+      }
       try {
         const head = await fetch(ASSET_BASE + "data/meta.json", { cache: "no-cache" });
         if (head.ok) {

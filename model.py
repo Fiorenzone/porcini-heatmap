@@ -64,6 +64,33 @@ HOSTS = {
 BAD_HOSTS = ("robini", "douglas", "ontano", "alnet", "pioppo", "salic", "eucalipt", "antropogen")
 
 
+# Classe carta suoli: 0 ignota, 1 acida, 2 subacida, 3 neutra, 4 subalcalina/calcare, 5 alcalina.
+# Edulis e pinophilus acidofili: il calcare puro taglia, non azzera (carta 1:50k sbaglia i versanti misti).
+_SOIL_F = {
+    "edulis": (1.0, 1.0, 1.0, 0.85, 0.35, 0.15),
+    "pinophilus": (1.0, 1.0, 1.0, 0.80, 0.30, 0.12),
+    "aestivalis": (1.0, 1.0, 1.0, 1.0, 0.55, 0.30),
+    "aereus": (1.0, 1.0, 1.0, 1.0, 0.75, 0.45),
+}
+
+
+# DUSAF: 0 assente, 1 denso/fustaia, 2 ceduo denso, 3 rado, 4 castagneto, 5 ripariale, 6 neoformazione.
+_COVER_F = (1.0, 1.0, 0.90, 0.70, 0.85, 0.40, 0.35)
+
+
+def cover_factor(cover: int) -> float:
+    if cover <= 0 or cover >= len(_COVER_F):
+        return 1.0
+    return _COVER_F[cover]
+
+
+def soil_factor(species: str, soil: int) -> float:
+    scale = _SOIL_F.get(species)
+    if not scale or soil <= 0 or soil >= len(scale):
+        return 1.0
+    return scale[soil]
+
+
 def host_factor(species: str, label: str | None) -> tuple[float, str | None]:
     """Moltiplicatore dal nome specie della carta forestale. Senza carta resta un ospite incerto."""
     if not label:
@@ -131,6 +158,14 @@ def _canopy_wind_frac(leaf: str) -> float:
     return {"conifere": 0.28, "misto": 0.35, "latifoglie": 0.42}.get(leaf, 0.55)
 
 
+def _dry_sector(deg: float | None) -> bool | None:
+    """Tramontana, grecale, favonio: 300°–60° passando per il nord."""
+    if deg is None:
+        return None
+    d = float(deg) % 360.0
+    return d >= 300.0 or d <= 60.0
+
+
 def _desiccation(
     past: list[dict], leaf: str, since: int | None
 ) -> tuple[float, dict]:
@@ -154,12 +189,18 @@ def _desiccation(
     shelter = _canopy_wind_frac(leaf)
     vpds: list[float] = []
     us: list[float] = []
+    gusts: list[float] = []
+    dry_flags: list[float] = []
     for d in recent:
         v = _vpd_kpa(d.get("tmean"), d.get("rh"))
         if v is not None:
             vpds.append(v)
         # vento sotto chioma ≈ frazione del max giornaliero a 10 m
         us.append(_wind_ms(d.get("wind")) * shelter)
+        gusts.append(_wind_ms(d.get("gust")) * shelter)
+        flag = _dry_sector(d.get("wdir"))
+        if flag is not None:
+            dry_flags.append(1.0 if flag else 0.0)
 
     if not vpds:
         return 1.0, meta
@@ -189,11 +230,25 @@ def _desiccation(
         weight = 0.35
 
     blended = 1.0 - weight * (1.0 - factor)
+    dry_frac = (sum(dry_flags) / len(dry_flags)) if dry_flags else None
+    gust_u = sum(gusts) / len(gusts) if gusts else 0.0
+    # Settore secco dominante + vento che arriva al suolo: abort dei primordia.
+    # Lo scirocco umido non entra (dry_frac basso). ET0 non si rimoltiplica.
+    if (
+        dry_frac is not None
+        and dry_frac >= 0.66
+        and since is not None
+        and since <= 16
+        and max(u, gust_u) >= 1.5
+    ):
+        strong = max(u, gust_u) >= 3.0
+        blended = max(0.35, blended * (0.62 if strong else 0.82))
     meta = {
         "vpd": round(vpd, 2),
         "wind_ms": round(u, 2),
         "evap_demand": round(demand, 2),
         "desiccation": round(blended, 2),
+        "dry_wind": None if dry_frac is None else round(dry_frac, 2),
     }
     return blended, meta
 
@@ -239,8 +294,15 @@ def _bucket(days: list[dict], slope: float, twi: float, rad: float) -> tuple[flo
     return swc, 100.0 * good / len(used)
 
 
-def _incubation(days: list[dict]) -> tuple[int | None, float]:
-    """Giorni dall'ultima pioggia innescante (>=20 mm in 3 giorni) e peso della finestra 8-15 gg."""
+def _incub_peak(aspect: float, slope: float) -> float:
+    """Nord ritarda, sud anticipa. Piano: picco al giorno 11, come prima."""
+    northness = math.cos(math.radians(aspect))
+    tilt = math.sin(math.radians(min(max(slope, 0.0), 45.0)))
+    return 11.0 + 6.0 * northness * tilt
+
+
+def _incubation(days: list[dict], aspect: float = 180.0, slope: float = 0.0) -> tuple[int | None, float]:
+    """Giorni dall'ultima pioggia innescante (>=20 mm in 3 giorni). Picco spostato dal versante."""
     daily = [(d.get("precip") or 0) for d in days]
     last = None
     for i in range(len(daily) - 1, -1, -1):
@@ -250,11 +312,30 @@ def _incubation(days: list[dict]) -> tuple[int | None, float]:
             break
     if last is None:
         return None, 0.0
+    peak = _incub_peak(aspect, slope)
     if last < 5:
         return last, 0.35
-    if last <= 18:
-        return last, math.exp(-0.5 * ((last - 11) / 4.0) ** 2)
+    hi = 18.0 + max(0.0, peak - 11.0)
+    if last <= hi:
+        return last, math.exp(-0.5 * ((last - peak) / 4.0) ** 2)
     return last, 0.15
+
+
+# Quanto un'estate fredda pesa in più sulle specie termofile.
+_HEAT_BIAS = {"edulis": 0.0, "pinophilus": -1.0, "aestivalis": 0.8, "aereus": 1.2}
+
+
+def heat_factor(species: str, anomaly: float | None) -> float:
+    """Anomalia JJA del suolo 28–100 cm rispetto alle due estati precedenti. Assente → ×1."""
+    if anomaly is None:
+        return 1.0
+    a = float(anomaly) - _HEAT_BIAS.get(species, 0.0)
+    if a >= -0.8:
+        return 1.0
+    if a <= -3.0:
+        return 0.45
+    t = (a - (-3.0)) / ((-0.8) - (-3.0))
+    return 0.45 + t * 0.55
 
 
 def radiation_factor(aspect: float, slope: float) -> float:
@@ -299,11 +380,19 @@ def score_series(
     month: int,
     today_index: int,
     label: str | None = None,
+    soil: int = 0,
+    cover: int = 0,
+    heat: float | None = None,
 ) -> dict:
     """days ordinati nel tempo. today_index è l'ultimo giorno osservato."""
     hab = habitat_factor(species, leaf, elev, month)
     host, host_hit = host_factor(species, label)
-    hab *= host
+    soil_class = int(soil or 0)
+    soil_f = soil_factor(species, soil_class)
+    cover_class = int(cover or 0)
+    cover_f = cover_factor(cover_class)
+    heat_f = heat_factor(species, heat)
+    hab *= host * soil_f * cover_f * heat_f
     spec = SPECIES[species]
     rad = radiation_factor(aspect, slope)
     out_days = []
@@ -325,7 +414,7 @@ def score_series(
         rain_term = min(1.0, rain26 / 80.0)
         shock = _shock(past)
         therm = _therm(tmean, spec["topt"])
-        since, incub = _incubation(past)
+        since, incub = _incubation(past, aspect, slope)
         rh = _mean([d.get("rh") for d in past[-5:]])
         rh_term = 1.0 if rh is None else max(0.75, min(1.1, 0.55 + rh / 150.0))
         dry, dry_meta = _desiccation(past, leaf, since)
@@ -353,6 +442,7 @@ def score_series(
                 "wind_ms": dry_meta.get("wind_ms"),
                 "evap_demand": dry_meta.get("evap_demand"),
                 "desiccation": dry_meta.get("desiccation"),
+                "dry_wind": dry_meta.get("dry_wind"),
             }
         )
     if not out_days:
@@ -379,6 +469,12 @@ def score_series(
         "best": best,
         "days": out_days,
         "habitat": round(hab, 2),
+        "soil": soil_class,
+        "soil_factor": round(soil_f, 2),
+        "cover": cover_class,
+        "cover_factor": round(cover_f, 2),
+        "heat": None if heat is None else round(float(heat), 2),
+        "heat_factor": round(heat_f, 2),
         "radiation": round(rad, 2),
         "incomplete": incomplete,
         "species": spec["name"],
