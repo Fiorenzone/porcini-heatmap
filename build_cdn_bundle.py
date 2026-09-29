@@ -27,17 +27,34 @@ import bulletins
 import forest_grid
 import weather
 from geo import idw_daily, in_italy, slope_aspect_twi
-from model import score_series
-from server import SPECIES_ALL, _forest_at, _today_index
+from model import forest_proxy, score_series
 
 ROOT = Path(__file__).resolve().parent
 OUT = ROOT / "static" / "data"
 MAGIC = b"PORCAMP1"
 HEADER_LEN = 64
 CELL_BYTES = 11  # i16 elev + u8 leaf + 4*(stage,p)
-SPECIES = SPECIES_ALL  # edulis, pinophilus, aestivalis, aereus
+SPECIES = ("edulis", "pinophilus", "aestivalis", "aereus")
 ITALY = (36.6, 6.6, 47.1, 18.5)
 LEAF_CODE = {"altro": 1, "latifoglie": 2, "conifere": 3, "misto": 4}
+
+
+def _forest_at(lat: float, lon: float, elev: float) -> tuple[str, str]:
+    # CI/CDN: solo griglia compatta — niente pickle/shapefile.
+    if forest_grid.exists():
+        forest_grid.warm()
+        g = forest_grid.lookup(lat, lon)
+        if g is not None:
+            return g
+    return forest_proxy(lat, elev)
+
+
+def _today_index(days: list[dict]) -> int:
+    today = date.today().isoformat()
+    for i, d in enumerate(days):
+        if d["date"] >= today:
+            return max(0, i - 1) if d["date"] > today else i
+    return len(days) - 1
 
 
 def _step() -> float:
