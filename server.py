@@ -208,6 +208,10 @@ class Handler(BaseHTTPRequestHandler):
                 },
             )
             return
+        if parsed.path == "/api/meteo/plan":
+            full = q.get("italy", ["1"])[0] != "0"
+            _json(self, 200, weather.client_plan(full_italy=full))
+            return
         if parsed.path == "/api/meteo/probe":
             _json(self, 200, weather.probe())
             return
@@ -256,20 +260,8 @@ class Handler(BaseHTTPRequestHandler):
             _json(self, 200, cell_detail(lat, lon, species))
             return
         if parsed.path == "/api/refresh":
-            full = q.get("italy", ["0"])[0] == "1"
-            # async=1 (default su hosting): non bloccare HTTP oltre timeout Render
-            async_mode = q.get("async", ["1"])[0] != "0"
-            if async_mode:
-                info = weather.start_refresh_bg(full_italy=full, quick=True)
-                _json(self, 200, info)
-                return
-            with _lock:
-                try:
-                    info = weather.refresh(full_italy=full, quick=True)
-                except Exception as exc:
-                    _json(self, 502, {"error": str(exc)})
-                    return
-            _json(self, 200, info)
+            # Non chiamare Open-Meteo da qui: l'IP di Render è in 429.
+            _json(self, 200, {"client": True, **weather.client_plan(full_italy=True)})
             return
         path = STATIC / ("index.html" if parsed.path in ("/", "") else parsed.path.lstrip("/"))
         if not path.resolve().is_relative_to(STATIC.resolve()) or not path.is_file():
@@ -287,6 +279,30 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        if parsed.path != "/api/meteo/ingest":
+            self.send_error(404)
+            return
+        try:
+            n = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            n = 0
+        if n <= 0 or n > 8_000_000:
+            _json(self, 400, {"error": "body"})
+            return
+        try:
+            body = json.loads(self.rfile.read(n).decode())
+        except (json.JSONDecodeError, UnicodeError):
+            _json(self, 400, {"error": "json"})
+            return
+        if not isinstance(body, dict):
+            _json(self, 400, {"error": "json"})
+            return
+        info = weather.ingest(body.get("stations") or [], full_italy=bool(body.get("full_italy", True)))
+        code = 200 if not info.get("error") else 400
+        _json(self, code, info)
 
 
 def main():
@@ -334,12 +350,10 @@ def main():
 
     threading.Thread(target=_bull, daemon=True, name="bulletins-warm").start()
 
-    if weather.needs_refresh():
-        print("avvio meteo background (quick nord)…", flush=True)
-        # Solo nord al boot — Italia dopo, da UI, per non prendere 429
-        weather.start_refresh_bg(full_italy=False, quick=True)
-    else:
-        print(f"meteo cache ok ({weather.cache_age_hours():.1f}h)", flush=True)
+    # Meteo solo dal browser. Render non chiama Open-Meteo (IP condiviso → 429).
+    n = len(weather.stations())
+    age = weather.cache_age_hours()
+    print(f"meteo cache: {n} stazioni, età {age}", flush=True)
 
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"porcini heatmap su http://{HOST}:{PORT}", flush=True)

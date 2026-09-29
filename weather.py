@@ -175,6 +175,81 @@ def _fetch(
     return out
 
 
+def client_plan(*, full_italy: bool = True) -> dict:
+    """Griglia da scaricare nel browser. Il server non chiama Open-Meteo."""
+    step = 0.45 if full_italy else 0.22
+    south, west, north, east = ITALY_BOX if full_italy else LOM_ER
+    pts = weather_points(south, west, north, east, step)
+    return {
+        "points": [[lat, lon] for lat, lon in pts],
+        "daily": DAILY,
+        "past_days": 26,
+        "forecast_days": 14,
+        "chunk": 12,
+        "timezone": "Europe/Rome",
+        "count": len(pts),
+    }
+
+
+_DAY_KEYS = ("date", "tmean", "tsoil", "precip", "rh", "et0", "wind", "rad", "smoist")
+
+
+def ingest(rows: list, *, full_italy: bool = True) -> dict:
+    """Salva stazioni già scaricate dal browser (IP del visitatore, non di Render)."""
+    global _LAST_ERROR, _LAST_OK_AT
+    clean: list[dict] = []
+    for raw in rows or []:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            lat = float(raw["lat"])
+            lon = float(raw["lon"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not (35.0 <= lat <= 48.5 and 6.0 <= lon <= 19.5):
+            continue
+        days_in = raw.get("days")
+        if not isinstance(days_in, list):
+            continue
+        days = []
+        for d in days_in[:48]:
+            if not isinstance(d, dict) or not isinstance(d.get("date"), str):
+                continue
+            if len(d["date"]) < 8:
+                continue
+            days.append({k: d.get(k) for k in _DAY_KEYS})
+        if len(days) < 7:
+            continue
+        elev = raw.get("elev")
+        try:
+            elev_v = float(elev) if elev is not None else None
+        except (TypeError, ValueError):
+            elev_v = None
+        clean.append({"lat": round(lat, 3), "lon": round(lon, 3), "elev": elev_v, "days": days})
+        if len(clean) >= 900:
+            break
+    if not clean:
+        return {"count": len(stations()), "added": 0, "error": "nessuna stazione valida"}
+    elev_map = _load(ELEV, {})
+    for s in clean:
+        if s.get("elev") is not None:
+            elev_map[f"{s['lat']:.3f},{s['lon']:.3f}"] = s["elev"]
+    now = datetime.now(timezone.utc).isoformat()
+    data = {
+        "fetched_at": now,
+        "full_italy": bool(full_italy),
+        "count": len(clean),
+        "stations": clean,
+        "source": "browser",
+    }
+    with _refresh_lock:
+        _save(CACHE, data)
+        _save(ELEV, elev_map)
+        _LAST_ERROR = None
+        _LAST_OK_AT = now
+    return {"count": len(clean), "fetched_at": now, "full_italy": bool(full_italy)}
+
+
 def probe() -> dict:
     """1 punto Open-Meteo — diagnostica networking da Render."""
     global _LAST_ERROR
