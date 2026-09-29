@@ -28,3 +28,6 @@ data/bulletins/
 # Compatta: va in repo / Docker (≈2MB). Pickle restano ignorati.
 !data/forest/forest_grid.bin
 !data/forest/forest_grid.json
+
+# Bundle CDN (generato da Actions / build_cdn_bundle.py)
+static/data/

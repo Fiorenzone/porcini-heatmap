@@ -23,6 +23,9 @@ STATIC = ROOT / "static"
 PORT = int(os.environ.get("PORT", "8765"))
 HOST = os.environ.get("HOST", "127.0.0.1")
 _lock = threading.Lock()
+SPECIES_ALL = ("edulis", "pinophilus", "aestivalis", "aereus")
+_viewport_cache: dict[tuple, dict] = {}
+_viewport_lock = threading.Lock()
 
 
 def _json(handler, code: int, payload) -> None:
@@ -62,44 +65,9 @@ def _forest_at(lat: float, lon: float, elev: float) -> tuple[str, str]:
     return forest_proxy(lat, elev)
 
 
-def _feature(
-    lat: float,
-    lon: float,
-    elev: float,
-    slope: float,
-    aspect: float,
-    twi: float,
-    species: str,
-    stations: list,
-    month: int,
-    with_days: bool = False,
-) -> dict | None:
-    leaf, leaf_note = _forest_at(lat, lon, elev)
-    series = idw_daily(stations, lat, lon)
-    if not series:
-        return None
-    scored = score_series(
-        series,
-        species=species,
-        leaf=leaf,
-        elev=elev,
-        slope=slope,
-        aspect=aspect,
-        twi=twi,
-        month=month,
-        today_index=_today_index(series),
-        label=leaf_note.split(": ")[-1] if leaf_note.startswith("Carta forestale") else None,
-    )
+def _scored_slice(scored: dict) -> dict:
     today = scored.get("today") or {}
-    out = {
-        "lat": round(lat, 4),
-        "lon": round(lon, 4),
-        "elev": elev,
-        "slope": slope,
-        "aspect": aspect,
-        "twi": twi,
-        "leaf": leaf,
-        "leaf_note": leaf_note,
+    return {
         "decision": scored["decision"],
         "stage": scored.get("stage") or 0,
         "p": today.get("p"),
@@ -117,12 +85,74 @@ def _feature(
         "evap_demand": today.get("evap_demand"),
         "desiccation": today.get("desiccation"),
     }
+
+
+def _feature(
+    lat: float,
+    lon: float,
+    elev: float,
+    slope: float,
+    aspect: float,
+    twi: float,
+    species: str,
+    stations: list,
+    month: int,
+    with_days: bool = False,
+) -> dict | None:
+    leaf, leaf_note = _forest_at(lat, lon, elev)
+    series = idw_daily(stations, lat, lon)
+    if not series:
+        return None
+    label = leaf_note.split(": ")[-1] if leaf_note.startswith("Carta forestale") else None
+    scored = score_series(
+        series,
+        species=species,
+        leaf=leaf,
+        elev=elev,
+        slope=slope,
+        aspect=aspect,
+        twi=twi,
+        month=month,
+        today_index=_today_index(series),
+        label=label,
+    )
+    out = {
+        "lat": round(lat, 4),
+        "lon": round(lon, 4),
+        "elev": elev,
+        "slope": slope,
+        "aspect": aspect,
+        "twi": twi,
+        "leaf": leaf,
+        "leaf_note": leaf_note,
+        **_scored_slice(scored),
+    }
     if with_days:
         out["days"] = scored.get("days") or []
     return out
 
 
+def _meteo_viewport_tag() -> tuple:
+    data = json.loads(weather.CACHE.read_text()) if weather.CACHE.exists() else {}
+    return data.get("fetched_at"), len(data.get("stations") or [])
+
+
+def _viewport_cache_key(south, west, north, east, *, all_species: bool) -> tuple:
+    s, w, n, e = (round(south, 2), round(west, 2), round(north, 2), round(east, 2))
+    fetched, nst = _meteo_viewport_tag()
+    return (s, w, n, e, fetched, nst, all_species)
+
+
 def viewport(south, west, north, east, species: str, with_days: bool = False) -> dict:
+    all_species = species == "all"
+    if with_days and all_species:
+        raise ValueError("all + with_days")
+    key = _viewport_cache_key(south, west, north, east, all_species=all_species)
+    with _viewport_lock:
+        hit = _viewport_cache.get(key)
+        if hit is not None:
+            return hit
+
     rows, step = lattice(south, west, north, east)
     flat = [p for row in rows for p in row]
     elev = weather.elev_local(flat)
@@ -131,15 +161,74 @@ def viewport(south, west, north, east, species: str, with_days: bool = False) ->
     features = []
     month = date.today().month
     for lat, lon in flat:
-        key = (round(lat, 4), round(lon, 4))
-        z = elev.get(key)
+        key_pt = (round(lat, 4), round(lon, 4))
+        z = elev.get(key_pt)
         if z is None:
             continue
-        slope, aspect, twi = terrain.get(key, (5.0, 180.0, 8.0))
-        feat = _feature(lat, lon, z, slope, aspect, twi, species, stations, month, with_days)
-        if feat:
+        slope, aspect, twi = terrain.get(key_pt, (5.0, 180.0, 8.0))
+        leaf, leaf_note = _forest_at(lat, lon, z)
+        series = idw_daily(stations, lat, lon)
+        if not series:
+            continue
+        label = leaf_note.split(": ")[-1] if leaf_note.startswith("Carta forestale") else None
+        ti = _today_index(series)
+        base = {
+            "lat": round(lat, 4),
+            "lon": round(lon, 4),
+            "elev": z,
+            "slope": slope,
+            "aspect": aspect,
+            "twi": twi,
+            "leaf": leaf,
+            "leaf_note": leaf_note,
+        }
+        if all_species:
+            by = {}
+            for sp in SPECIES_ALL:
+                scored = score_series(
+                    series,
+                    species=sp,
+                    leaf=leaf,
+                    elev=z,
+                    slope=slope,
+                    aspect=aspect,
+                    twi=twi,
+                    month=month,
+                    today_index=ti,
+                    label=label,
+                )
+                by[sp] = _scored_slice(scored)
+            features.append({**base, "by": by})
+        else:
+            scored = score_series(
+                series,
+                species=species,
+                leaf=leaf,
+                elev=z,
+                slope=slope,
+                aspect=aspect,
+                twi=twi,
+                month=month,
+                today_index=ti,
+                label=label,
+            )
+            feat = {**base, **_scored_slice(scored)}
+            if with_days:
+                feat["days"] = scored.get("days") or []
             features.append(feat)
-    return {"step_deg": round(step, 4), "count": len(features), "cells": features, "species": species}
+
+    payload = {
+        "step_deg": round(step, 4),
+        "count": len(features),
+        "cells": features,
+        "species": "all" if all_species else species,
+        "all_species": all_species,
+    }
+    if len(_viewport_cache) > 6:
+        _viewport_cache.clear()
+    with _viewport_lock:
+        _viewport_cache[key] = payload
+    return payload
 
 
 def score_point(lat: float, lon: float, species: str, with_days: bool = False) -> dict | None:
@@ -237,7 +326,7 @@ class Handler(BaseHTTPRequestHandler):
                 _json(self, 400, {"error": "bbox mancante"})
                 return
             species = q.get("species", ["edulis"])[0]
-            if species not in ("edulis", "pinophilus", "aestivalis", "aereus"):
+            if species not in (*SPECIES_ALL, "all"):
                 _json(self, 400, {"error": "specie"})
                 return
             if not weather.stations():

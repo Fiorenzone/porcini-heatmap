@@ -77,8 +77,12 @@ def weather_points(south: float, west: float, north: float, east: float, step: f
 _LADDER = (0.005, 0.0075, 0.01, 0.015, 0.02, 0.03, 0.04, 0.06, 0.08, 0.12, 0.16)
 
 
-def lattice(south: float, west: float, north: float, east: float, step: float = 0.005, cap: int = 1600):
-    """Griglia fissa, agganciata a multipli dello step, con un anello fuori dal riquadro."""
+def lattice(south: float, west: float, north: float, east: float, step: float = 0.005, cap: int | None = None):
+    import os
+
+    if cap is None:
+        cap = int(os.environ.get("PORCINI_LATTICE_CAP", "1600"))
+    # Griglia fissa, agganciata a multipli dello step, con un anello fuori dal riquadro.
     step = _LADDER[-1]
     for candidate in _LADDER:
         nlat = int((north - south) / candidate) + 3

@@ -146,6 +146,7 @@
   </div>
   <aside id="panel" class="card"></aside>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="./heatmap.js"></script>
   <script>
     const map = L.map("map", { zoomControl: true }).setView([44.55, 10.0], 9);
     L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
@@ -181,6 +182,8 @@
     let timer = null;
     let inflight = null;
     let weatherReady = false;
+    let CDN = null; // { meta, grid, bulletins }
+    const ASSET_BASE = new URL("./", window.location.href).href;
 
     const WORDS = {
       vai: ["Vai", "Oggi il bosco è in finestra."],
@@ -318,6 +321,15 @@
     function loadVerdict(c) {
       const box = document.getElementById("verdict");
       if (!box) return;
+      if (CDN && CDN.bulletins) {
+        box.className = "verdict " + (compareLocal(c).verdict || "assente");
+        const d = compareLocal(c);
+        const link = (d.areas && d.areas[0] && d.areas[0].url)
+          ? ` <a href="${d.areas[0].url}" target="_blank" rel="noopener">fonte</a>`
+          : "";
+        box.innerHTML = `<strong>${d.title || "Bollettini"}</strong><p>${d.body || ""}${link}</p>`;
+        return;
+      }
       fetch(`/api/bulletins/compare?lat=${c.lat}&lon=${c.lon}&stage=${c.stage || 0}`)
         .then((r) => r.json())
         .then((d) => {
@@ -334,10 +346,82 @@
         });
     }
 
+    function km(a, b, c, d) {
+      const x = (c - a) * 111.32;
+      const y = (d - b) * 111.32 * Math.cos((a * Math.PI) / 180);
+      return Math.hypot(x, y);
+    }
+
+    function compareLocal(c) {
+      const data = CDN.bulletins || {};
+      const near = [];
+      (data.reports || []).forEach((rep) => {
+        (rep.areas || []).forEach((a) => {
+          if (a.lat == null || a.level == null) return;
+          const dist = km(c.lat, c.lon, a.lat, a.lon);
+          if (dist > 28) return;
+          near.push({
+            name: a.name,
+            level: a.level,
+            level_word: a.level_word,
+            source: a.source || rep.source,
+            url: a.url || rep.url,
+            km: Math.round(dist * 10) / 10
+          });
+        });
+      });
+      near.sort((x, y) => x.km - y.km || (x.source === "Geoticket" ? 0 : 1) - (y.source === "Geoticket" ? 0 : 1));
+      if (!near.length) {
+        return {
+          verdict: "assente",
+          title: "Nessun bollettino vicino",
+          body: "Entro 28 km non c’è un voto pubblico numerico.",
+          areas: []
+        };
+      }
+      const best = near[0];
+      const stage = c.stage || 0;
+      const mid = { 0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5 }[stage];
+      const gap = Math.abs(best.level - mid);
+      if (stage <= 0 && best.level >= 3) {
+        return {
+          verdict: "smentisce",
+          title: "Bollettino smentisce",
+          body: `${best.source} su ${best.name} (${best.km} km): ${best.level}/5. La mappa dice poco o niente.`,
+          areas: near
+        };
+      }
+      if (gap >= 2) {
+        return {
+          verdict: "smentisce",
+          title: "Bollettino smentisce",
+          body: `${best.source} su ${best.name} (${best.km} km): ${best.level}/5. Diverge dalla mappa.`,
+          areas: near
+        };
+      }
+      if (gap <= 1) {
+        return {
+          verdict: "conferma",
+          title: "Bollettino conferma",
+          body: `${best.source} su ${best.name} (${best.km} km): ${best.level}/5${best.level_word ? " " + best.level_word : ""}. Allineato allo stadio della mappa.`,
+          areas: near
+        };
+      }
+      return {
+        verdict: "vicino",
+        title: "Bollettino vicino",
+        body: `${best.source} su ${best.name} (${best.km} km): ${best.level}/5.`,
+        areas: near
+      };
+    }
+
     function loadDetail(c) {
       const box = document.getElementById("advanced");
       box.style.display = "block";
-      // Se days già dal click /api/cell, evita secondo roundtrip
+      if (CDN) {
+        box.innerHTML = `<p class="sub">Dettaglio giornaliero sul CDN arriva col prossimo ciclo meteo. Ora: stadio ${c.stage}/5 · ${Math.round((c.p || 0) * 100)}% · ${Math.round(c.elev || 0)} m · ${c.leaf || ""}.</p>`;
+        return;
+      }
       if (c.days && c.days.length) {
         renderDetail(c, box);
         return;
@@ -429,7 +513,7 @@
 
     async function ensureRegions() {
       if (REGION_POLYS) return REGION_POLYS;
-      const data = await (await fetch("/regions_it.json")).json();
+      const data = await (await fetch(ASSET_BASE + "regions_it.json")).json();
       const out = {};
       (data.features || []).forEach((f) => {
         const key = f.properties && f.properties.key;
@@ -463,6 +547,16 @@
     function rankRegion(key) {
       const reg = REGION_POLYS && REGION_POLYS[key];
       if (!reg) return [];
+      if (CDN && CDN.grid) {
+        const sp = document.getElementById("species").value;
+        return PorciniHeat.cellsInRegion(CDN.grid, sp, pointInRegion, reg)
+          .sort((a, b) => {
+            const ds = (b.stage || 0) - (a.stage || 0);
+            if (ds) return ds;
+            return (b.p || 0) - (a.p || 0);
+          })
+          .slice(0, 5);
+      }
       const src = baseCells.length ? baseCells : cells;
       return src
         .filter((c) => (c.stage || 0) > 0 && pointInRegion(c.lat, c.lon, reg))
@@ -570,13 +664,17 @@
         say("confini regione non caricati");
         return;
       }
-      if (!weatherReady || !(baseCells.length || cells.length)) {
-        say("scarico meteo…", true);
+      if (!weatherReady) {
+        say("scarico…", true);
         await refresh();
-        if (!(baseCells.length || cells.length)) {
+        if (!weatherReady) {
           say("niente dati — riprova Aggiorna");
           return;
         }
+      }
+      if (!CDN && !(baseCells.length || cells.length)) {
+        say("niente dati — riprova Aggiorna");
+        return;
       }
       if (bulletOn) {
         bulletOn = false;
@@ -603,7 +701,25 @@
     }
 
     let baseCells = [];
+    let baseBundle = [];
+    let detailBundle = [];
     let baseStep = 0.05;
+
+    function flattenCells(bundle, sp) {
+      if (!bundle.length) return [];
+      if (!bundle[0].by) return bundle;
+      return bundle.map((c) => {
+        const v = c.by[sp] || {};
+        const { by, ...rest } = c;
+        return { ...rest, ...v };
+      });
+    }
+
+    function applySpeciesCells() {
+      const sp = document.getElementById("species").value;
+      baseCells = flattenCells(baseBundle, sp);
+      cells = detailSheet ? flattenCells(detailBundle, sp) : baseCells;
+    }
 
     function say(text, busy) {
       const el = document.getElementById("status");
@@ -619,12 +735,38 @@
     }
 
     async function loadView(detail) {
+      if (CDN && CDN.grid) {
+        setHeatBusy(true);
+        try {
+          const sp = document.getElementById("species").value;
+          const b = detail ? paddedBounds() : BASE_BOX;
+          const maxPts = detail ? 6000 : 5000;
+          const sampled = PorciniHeat.sampleCells(CDN.grid, b, sp, maxPts);
+          cells = sampled.cells;
+          step = sampled.step || CDN.grid.step;
+          if (!detail) {
+            baseCells = cells;
+            baseStep = step;
+            baseBundle = [];
+          } else {
+            detailBundle = [];
+          }
+          paintLayer(cells, step, detail ? "detail" : "base");
+          const age = CDN.meta && CDN.meta.fetched_at
+            ? new Date(CDN.meta.fetched_at).toLocaleString("it-IT", { hour: "2-digit", minute: "2-digit", day: "numeric", month: "short" })
+            : "";
+          say(age ? `dati ${age}` : "");
+        } finally {
+          setHeatBusy(false);
+        }
+        return;
+      }
       if (inflight) inflight.abort();
       inflight = new AbortController();
       setHeatBusy(true);
       const b = detail ? paddedBounds() : BASE_BOX;
       const species = document.getElementById("species").value;
-      const url = `/api/viewport?s=${b.s}&w=${b.w}&n=${b.n}&e=${b.e}&species=${species}`;
+      const url = `/api/viewport?s=${b.s}&w=${b.w}&n=${b.n}&e=${b.e}&species=all`;
       try {
         const res = await fetch(url, { signal: inflight.signal });
         const data = await res.json();
@@ -632,11 +774,16 @@
           say("riprova tra poco");
           return;
         }
-        cells = data.cells || [];
         step = data.step_deg || step;
-        if (!detail) {
-          baseCells = cells;
+        const bundle = data.cells || [];
+        if (detail) {
+          detailBundle = bundle;
+          cells = flattenCells(bundle, species);
+        } else {
+          baseBundle = bundle;
           baseStep = step;
+          baseCells = flattenCells(bundle, species);
+          cells = baseCells;
         }
         say("");
         paintLayer(cells, step, detail ? "detail" : "base");
@@ -651,7 +798,8 @@
       if (!detailSheet) return;
       map.removeLayer(detailSheet);
       detailSheet = null;
-      cells = baseCells;
+      detailBundle = [];
+      applySpeciesCells();
       step = baseStep;
       say("");
     }
@@ -718,7 +866,27 @@
       return parseMeteo(await res.json());
     }
 
+    async function loadCdn() {
+      say("carico mappa…", true);
+      CDN = await PorciniHeat.loadBundle(ASSET_BASE);
+      weatherReady = true;
+      await loadView(false);
+      return true;
+    }
+
     async function refresh() {
+      try {
+        const probe = await fetch(ASSET_BASE + "data/meta.json", { cache: "no-cache" });
+        if (probe.ok || CDN) {
+          await loadCdn();
+          if (bestOn && bestRegions.size) {
+            const keys = [...bestRegions.keys()];
+            clearBest();
+            keys.forEach(addRegion);
+          }
+          return true;
+        }
+      } catch (_) {}
       say("scarico meteo…", true);
       try {
         const planRes = await fetch("/api/meteo/plan?italy=1");
@@ -777,6 +945,15 @@
 
     async function boot() {
       try {
+        const head = await fetch(ASSET_BASE + "data/meta.json", { cache: "no-cache" });
+        if (head.ok) {
+          await loadCdn();
+          return;
+        }
+      } catch (err) {
+        console.warn("cdn boot", err);
+      }
+      try {
         const s = await (await fetch("/api/status")).json();
         if ((s.stations || 0) > 0 && !s.needs_refresh) {
           weatherReady = true;
@@ -806,7 +983,10 @@
         clearBest();
       }
       say("bollettini", true);
-      const data = await (await fetch("/api/bulletins")).json();
+      const data = CDN && CDN.bulletins
+        ? CDN.bulletins
+        : await (await fetch("/api/bulletins")).json();
+      if (CDN) CDN.bulletins = data;
       const LVL_FILL = {
         0: "#78716c",
         1: "#2563eb",
@@ -847,9 +1027,19 @@
       say(n ? `${n} aree ufficiali` : "nessun bollettino");
     }
 
-    document.getElementById("species").onchange = async () => {
+    document.getElementById("species").onchange = () => {
       dropDetail();
-      await loadView(false);
+      if (CDN && CDN.grid) {
+        loadView(false).then(() => {
+          if (!bestOn || !bestRegions.size) return;
+          const keys = [...bestRegions.keys()];
+          clearBest();
+          keys.forEach(addRegion);
+        });
+        return;
+      }
+      applySpeciesCells();
+      paintLayer(baseCells, baseStep, "base");
       if (!bestOn || !bestRegions.size) return;
       const keys = [...bestRegions.keys()];
       clearBest();
@@ -864,10 +1054,29 @@
         toggleRegionAt(e.latlng.lat, e.latlng.lng);
         return;
       }
-      // Stessa cella della heatmap dipinta → p/stage coincidenti col colore sotto il dito.
       const lat = e.latlng.lat;
       const lon = e.latlng.lng;
       const species = document.getElementById("species").value;
+      if (CDN && CDN.grid) {
+        const cell = PorciniHeat.latLonToCell(CDN.grid, lat, lon);
+        if (!cell) {
+          say("nessun dato qui");
+          return;
+        }
+        const v = cell.by[species] || { stage: 0, p: 0 };
+        openCell({
+          lat: cell.lat,
+          lon: cell.lon,
+          elev: cell.elev,
+          leaf: cell.leaf,
+          leaf_note: cell.leaf,
+          stage: v.stage,
+          p: v.p,
+          decision: v.stage >= 4 ? "vai" : v.stage >= 2 ? "aspetta" : "lascia"
+        });
+        return;
+      }
+      // Stessa cella della heatmap dipinta → p/stage coincidenti col colore sotto il dito.
       const pool = detailSheet && cells.length ? cells : (baseCells.length ? baseCells : cells);
       const st = detailSheet && cells.length ? step : (baseStep || step || 0.05);
       let best = null;

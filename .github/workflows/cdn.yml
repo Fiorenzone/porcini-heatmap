@@ -1,0 +1,65 @@
+name: cdn-heatmap
+
+on:
+  schedule:
+    - cron: "15 */3 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "build_cdn_bundle.py"
+      - "model.py"
+      - "geo.py"
+      - "weather.py"
+      - "bulletins.py"
+      - "forest_grid.py"
+      - "server.py"
+      - "geoticket_dump.py"
+      - "static/**"
+      - "data/forest/forest_grid.bin"
+      - "data/forest/forest_grid.json"
+      - ".github/workflows/cdn.yml"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build heatmap bundle
+        env:
+          PORCINI_HEAT_STEP: "0.02"
+          PORCINI_BUILD_GRID: "0"
+        run: python3 build_cdn_bundle.py
+      - name: Assemble static site
+        run: |
+          mkdir -p _site/data
+          cp static/index.html static/heatmap.js static/regions_it.json _site/
+          cp static/data/meta.json static/data/heatmap.bin.gz static/data/bulletins.json _site/data/
+          # weather.json.gz opzionale (pesante) — skip per Pages slim
+          ls -la _site _site/data
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
