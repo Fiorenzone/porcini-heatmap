@@ -18,6 +18,7 @@ import forest_grid
 import soil_grid
 import soil_heat
 import forest_lom
+import vault
 import weather
 from geo import idw_daily, lattice, slope_aspect_twi
 from model import forest_proxy, score_series
@@ -333,8 +334,55 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         print("[porcini]", fmt % args)
 
+    def _bytes(self, code: int, raw: bytes, content_type: str) -> None:
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def _allow(self, parsed) -> bool:
+        if vault.token_ok(self.headers.get("X-Porcini-Token"), parsed.query):
+            return True
+        self._bytes(401, b"auth", "text/plain; charset=utf-8")
+        return False
+
+    def _login(self) -> None:
+        try:
+            n = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            n = 0
+        if n <= 0 or n > 4000:
+            self._bytes(400, b"no", "text/plain; charset=utf-8")
+            return
+        try:
+            body = json.loads(self.rfile.read(n).decode())
+            pw = body.get("password") if isinstance(body, dict) else None
+        except (json.JSONDecodeError, UnicodeError):
+            pw = None
+        if not isinstance(pw, str) or not vault.password_ok(pw):
+            self._bytes(401, "Password errata".encode(), "text/plain; charset=utf-8")
+            return
+        self._bytes(200, vault.render_app(vault.issue_token()), "text/html; charset=utf-8")
+
     def do_GET(self):
         parsed = urlparse(self.path)
+        if parsed.path in ("/", "/index.html"):
+            self._bytes(200, (STATIC / "enter.html").read_bytes(), "text/html; charset=utf-8")
+            return
+        if "/vault/" in parsed.path or parsed.path.endswith(".enc"):
+            self.send_error(404)
+            return
+        if parsed.path != "/api/status" and not self._allow(parsed):
+            return
+        if parsed.path == "/heatmap.js":
+            raw = vault.app_js()
+            if raw is None:
+                self.send_error(503)
+                return
+            self._bytes(200, raw, "text/javascript; charset=utf-8")
+            return
         q = parse_qs(parsed.query)
         if parsed.path == "/api/status":
             age = weather.cache_age_hours()
@@ -438,6 +486,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
+        if parsed.path == "/api/login":
+            self._login()
+            return
+        if not self._allow(parsed):
+            return
         if parsed.path != "/api/meteo/ingest":
             self.send_error(404)
             return
@@ -582,6 +635,7 @@ def main():
     age = weather.cache_age_hours()
     print(f"meteo cache: {n} stazioni, età {age}", flush=True)
 
+    vault.startup()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"porcini heatmap su http://{HOST}:{PORT}", flush=True)
     server.serve_forever()

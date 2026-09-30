@@ -5,6 +5,12 @@ __pycache__/
 .venv/
 venv/
 
+# Chiave e sorgente mappa: in git solo i .enc
+.porcini_key
+.porcini_pass
+static/index.html
+static/heatmap.js
+
 # macOS
 .DS_Store
 

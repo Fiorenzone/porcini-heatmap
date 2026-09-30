@@ -33,7 +33,8 @@ jobs:
       - name: Assemble static site
         run: |
           mkdir -p _site/data
-          cp static/index.html static/heatmap.js static/regions_it.json _site/
+          cp static/enter.html _site/index.html
+          cp static/regions_it.json _site/
           cp static/data/meta.json static/data/heatmap.bin.gz static/data/bulletins.json _site/data/
           # weather.json.gz opzionale (pesante) — skip per Pages slim
           ls -la _site _site/data

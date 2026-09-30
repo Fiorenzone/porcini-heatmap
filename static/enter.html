@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Cache-Control" content="no-store" />
+  <title>Porcini</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,560;9..144,640&family=Nunito:wght@700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    html, body { margin: 0; height: 100%; background: #c5c0b6; color: #14110e;
+      font: 15px/1.4 ui-sans-serif, -apple-system, system-ui, sans-serif; }
+    #bg {
+      position: fixed; inset: -12%;
+      filter: blur(10px) saturate(1.25) contrast(1.05);
+      transform: scale(1.02);
+      pointer-events: none;
+    }
+    #dof {
+      position: fixed; inset: 0; pointer-events: none; z-index: 1;
+      background:
+        radial-gradient(ellipse 48% 42% at 50% 48%, rgba(255,255,255,.05) 0%, rgba(255,255,255,0) 46%),
+        radial-gradient(ellipse 90% 80% at 50% 50%, rgba(20,17,14,0) 30%, rgba(20,17,14,.28) 100%);
+    }
+    .credit {
+      position: fixed; z-index: 2; right: 10px; bottom: 8px;
+      color: #3f3a36; font-size: 10px; text-shadow: 0 1px 0 rgba(255,255,255,.4);
+    }
+    .credit a { color: inherit; }
+    main {
+      position: relative; z-index: 2; min-height: 100%;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      padding: 24px;
+    }
+    h1 {
+      margin: 0 0 18px; text-align: center; font-weight: 560;
+      font-family: Fraunces, ui-serif, Georgia, serif;
+      font-size: clamp(34px, 6vw, 52px); letter-spacing: -.035em; line-height: 1.02;
+    }
+    .heat {
+      font-family: ui-rounded, Nunito, sans-serif;
+      font-weight: 700; letter-spacing: -.03em;
+      background-image: linear-gradient(
+        100deg,
+        #2563eb 0%,
+        #3b82f6 22%,
+        #eab308 46%,
+        #ea580c 64%,
+        #16a34a 82%,
+        #c026d3 100%
+      );
+      -webkit-background-clip: text; background-clip: text; color: transparent;
+    }
+    form {
+      width: min(360px, 100%);
+      background: rgba(255,255,255,.9);
+      border: 1px solid rgba(20,17,14,.1); border-radius: 18px; padding: 22px;
+      box-shadow: 0 1px 2px rgba(0,0,0,.06), 0 18px 40px -12px rgba(0,0,0,.35);
+    }
+    input, button { font: inherit; width: 100%; box-sizing: border-box; border-radius: 12px;
+      border: 1px solid rgba(20,17,14,.1); padding: 10px 12px; }
+    input { background: #fff; margin-bottom: 10px; }
+    button { background: #14110e; color: #fff; cursor: pointer; }
+    p { min-height: 1.2em; margin: 10px 0 0; color: #9f1239; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <div id="bg" aria-hidden="true"></div>
+  <div id="dof" aria-hidden="true"></div>
+  <p class="credit">&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a></p>
+  <main>
+    <h1>Porcini <span class="heat">Heatmap</span></h1>
+    <form id="gate">
+      <input id="pw" type="password" autocomplete="current-password" autofocus required aria-label="Password" />
+      <button type="submit">Entra</button>
+      <p id="msg"></p>
+    </form>
+  </main>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+  (function () {
+    const map = L.map("bg", {
+      zoomControl: false,
+      attributionControl: false,
+      dragging: false,
+      scrollWheelZoom: false,
+      doubleClickZoom: false,
+      boxZoom: false,
+      keyboard: false,
+      touchZoom: false
+    }).setView([44.55, 10.0], 9);
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 16 }).addTo(map);
+    const wash = [
+      [44.62, 10.05, "#16a34a", 9000],
+      [44.48, 9.72, "#c026d3", 8000],
+      [44.35, 10.35, "#ea580c", 7500],
+      [44.72, 9.55, "#eab308", 7000],
+      [44.22, 10.55, "#2563eb", 8500],
+      [44.58, 10.55, "#16a34a", 6000]
+    ];
+    wash.forEach(([lat, lon, color, r]) => {
+      L.circle([lat, lon], {
+        radius: r, color: color, weight: 0, fillColor: color, fillOpacity: 0.28, interactive: false
+      }).addTo(map);
+    });
+    document.getElementById("gate").onsubmit = async (ev) => {
+      ev.preventDefault();
+      const msg = document.getElementById("msg");
+      msg.textContent = "";
+      let res;
+      try {
+        res = await fetch("/api/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password: document.getElementById("pw").value })
+        });
+      } catch (_) {
+        msg.textContent = "rete";
+        return;
+      }
+      if (!res.ok) {
+        msg.textContent = res.status === 401 ? "Password errata" : "accesso non disponibile";
+        return;
+      }
+      document.open();
+      document.write(await res.text());
+      document.close();
+    };
+  })();
+  </script>
+</body>
+</html>

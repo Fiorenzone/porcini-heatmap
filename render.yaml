@@ -9,3 +9,5 @@ services:
         value: "0"
       - key: PYTHONUNBUFFERED
         value: "1"
+      - key: PORCINI_KEY
+        sync: false

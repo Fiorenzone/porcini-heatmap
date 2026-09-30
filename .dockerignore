@@ -1,6 +1,10 @@
 __pycache__
 *.pyc
 .git
+.porcini_key
+.porcini_pass
+static/index.html
+static/heatmap.js
 data/cache
 data/forest/**/*.pkl
 data/forest/**/*.zip
