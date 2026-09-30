@@ -40,7 +40,7 @@ _tokens: set[str] = set()
 
 
 def passphrase() -> str | None:
-    env = os.environ.get("PORCINI_KEY")
+    env = (os.environ.get("PORCINI_KEY") or "").strip()
     if env:
         return env
     path = ROOT / ".porcini_key"
