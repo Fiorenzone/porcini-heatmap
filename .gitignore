@@ -11,6 +11,35 @@ venv/
 static/index.html
 static/heatmap.js
 
+# Formula, modello, dati usati: in git solo secret/core.enc
+/arpa_rain.py
+/build_cdn_bundle.py
+/build_cover_grid.py
+/build_er_cover.py
+/build_er_lithology.py
+/build_forest_grid.py
+/build_soil_grid.py
+/bulletins.py
+/cover_grid.py
+/forest_er.py
+/forest_grid.py
+/forest_lom.py
+/geo.py
+/geoticket_dump.py
+/model.py
+/server.py
+/soil_grid.py
+/soil_heat.py
+/weather.py
+/data/forest/forest_grid.bin
+/data/forest/forest_grid.json
+/data/soil/soil_grid.bin
+/data/soil/soil_grid.json
+/data/soil/jja_heat.json
+/data/cover/cover_grid.bin
+/data/cover/cover_grid.json
+/data/arpa/erg5_cells.csv
+
 # macOS
 .DS_Store
 
@@ -31,15 +60,9 @@ data/forest/CartaForestale2025*/
 data/forest/pr.zip
 data/bulletins/
 
-# Compatta: va in repo / Docker (≈2MB). Pickle restano ignorati.
-!data/forest/forest_grid.bin
-!data/forest/forest_grid.json
-
-# Carta suoli: shapefile e json ArcGIS restano locali. La griglia compatta va in repo.
+# Carta suoli: shapefile e json ArcGIS restano locali.
 data/soil/_src/
 data/cover/_src/
-!data/soil/soil_grid.bin
-!data/soil/soil_grid.json
 
 # Bundle CDN (generato da Actions / build_cdn_bundle.py)
 static/data/

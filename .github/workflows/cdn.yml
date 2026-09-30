@@ -27,9 +27,10 @@ jobs:
           python-version: "3.12"
       - name: Build heatmap bundle
         env:
+          PORCINI_KEY: ${{ secrets.PORCINI_KEY }}
           PORCINI_HEAT_STEP: "0.02"
           PORCINI_BUILD_GRID: "0"
-        run: python3 build_cdn_bundle.py
+        run: python3 boot.py build
       - name: Assemble static site
         run: |
           mkdir -p _site/data

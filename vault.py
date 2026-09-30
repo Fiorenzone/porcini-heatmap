@@ -1,12 +1,15 @@
-"""Cifra la mappa a riposo. La chiave non sta nel repo: env PORCINI_KEY o .porcini_key."""
+"""Cifra formula, modello e dati a riposo. Chiave fuori dal repo: PORCINI_KEY o .porcini_key."""
 
 from __future__ import annotations
 
 import hashlib
 import hmac
+import importlib.util
 import json
 import os
 import secrets
+import struct
+import sys
 from pathlib import Path
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -14,8 +17,21 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
 VAULT = STATIC / "vault"
+CORE = ROOT / "secret" / "core.enc"
 MAGIC = b"PORC1"
 _KDF = 200_000
+PUBLIC_PY = frozenset({"vault.py", "boot.py"})
+DATA_FILES = (
+    "data/forest/forest_grid.bin",
+    "data/forest/forest_grid.json",
+    "data/soil/soil_grid.bin",
+    "data/soil/soil_grid.json",
+    "data/soil/jja_heat.json",
+    "data/cover/cover_grid.bin",
+    "data/cover/cover_grid.json",
+    "data/arpa/erg5_cells.csv",
+)
+_core_src: dict[str, bytes] = {}
 
 _html: bytes | None = None
 _js: bytes | None = None
@@ -69,8 +85,126 @@ def seal_password(password: str, key: str) -> None:
     (VAULT / "gate.enc").write_bytes(seal(password.encode("utf-8"), key))
 
 
+def _pack(files: dict[str, bytes]) -> bytes:
+    out = bytearray()
+    for name in sorted(files):
+        nb = name.encode("utf-8")
+        data = files[name]
+        out += struct.pack(">H", len(nb))
+        out += nb
+        out += struct.pack(">I", len(data))
+        out += data
+    return bytes(out)
+
+
+def _unpack(blob: bytes) -> dict[str, bytes]:
+    files: dict[str, bytes] = {}
+    i = 0
+    n = len(blob)
+    while i < n:
+        if i + 2 > n:
+            raise ValueError("vault")
+        (ln,) = struct.unpack_from(">H", blob, i)
+        i += 2
+        if ln <= 0 or i + ln + 4 > n:
+            raise ValueError("vault")
+        name = blob[i : i + ln].decode("utf-8")
+        i += ln
+        (dn,) = struct.unpack_from(">I", blob, i)
+        i += 4
+        if i + dn > n:
+            raise ValueError("vault")
+        files[name] = blob[i : i + dn]
+        i += dn
+    return files
+
+
+def _core_inputs() -> dict[str, bytes] | None:
+    files: dict[str, bytes] = {}
+    for path in sorted(ROOT.glob("*.py")):
+        if path.name in PUBLIC_PY:
+            continue
+        files[path.name] = path.read_bytes()
+    if not files:
+        return None
+    missing = [rel for rel in DATA_FILES if not (ROOT / rel).is_file()]
+    if missing:
+        print("core incompleto", flush=True)
+        return None
+    for rel in DATA_FILES:
+        files[rel] = (ROOT / rel).read_bytes()
+    return files
+
+
+def refresh_core() -> None:
+    key = passphrase()
+    files = _core_inputs()
+    if not key or files is None:
+        return
+    CORE.parent.mkdir(parents=True, exist_ok=True)
+    if CORE.is_file():
+        newest = max((ROOT / name).stat().st_mtime for name in files)
+        if newest <= CORE.stat().st_mtime:
+            return
+    CORE.write_bytes(seal(_pack(files), key))
+    print("core aggiornato", flush=True)
+
+
+class _Loader:
+    def __init__(self, source: bytes, origin: str) -> None:
+        self.source = source
+        self.origin = origin
+
+    def create_module(self, spec):
+        return None
+
+    def exec_module(self, module) -> None:
+        module.__file__ = self.origin
+        exec(compile(self.source, self.origin, "exec"), module.__dict__)
+
+
+class _Finder:
+    def find_spec(self, fullname, path, target=None):
+        if path is not None:
+            return None
+        rel = fullname + ".py"
+        src = _core_src.get(rel)
+        if src is None or (ROOT / rel).is_file():
+            return None
+        origin = str(ROOT / rel)
+        return importlib.util.spec_from_loader(fullname, _Loader(src, origin), origin=origin)
+
+
+def install_core() -> None:
+    global _core_src
+    refresh_core()
+    key = passphrase()
+    if (ROOT / "model.py").is_file():
+        return
+    if not key or not CORE.is_file():
+        print("PORCINI_KEY mancante", flush=True)
+        raise SystemExit(1)
+    try:
+        files = _unpack(open_vault(CORE.read_bytes(), key))
+    except Exception:
+        print("core illeggibile", flush=True)
+        raise SystemExit(1)
+    _core_src = {name: data for name, data in files.items() if name.endswith(".py")}
+    for name, data in files.items():
+        if name.endswith(".py"):
+            continue
+        dest = ROOT / name
+        if dest.is_file():
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+    if not any(isinstance(item, _Finder) for item in sys.meta_path):
+        sys.meta_path.insert(0, _Finder())
+
+
 def startup() -> None:
     global _html, _js, _password
+    refresh_core()
     key = passphrase()
     if not key:
         print("PORCINI_KEY mancante", flush=True)
