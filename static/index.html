@@ -29,7 +29,15 @@
     select, button { font: inherit; color: inherit; background: #fff;
       border: 1px solid var(--line); border-radius: 12px; padding: 8px 13px; cursor: pointer;
       transition: background .15s, color .15s, transform .12s; }
-    select { padding-right: 8px; font-weight: 600; }
+    #timewrap {
+      display: flex; align-items: center; gap: 8px;
+      flex: 1 1 168px; min-width: 154px; padding: 0 4px 0 6px;
+    }
+    #timewrap input[type="range"] {
+      flex: 1; min-width: 72px; accent-color: #14110e; height: 28px;
+    }
+    #daylab { font-weight: 700; font-size: 13px; white-space: nowrap; min-width: 5.4em; }
+    #bestday[hidden] { display: none !important; }
     button:hover { background: #f6f4f1; }
     button:active { transform: scale(.97); }
     button.ghost { background: transparent; }
@@ -117,6 +125,11 @@
       margin-top: 2px !important;
     }
     .leaflet-control-attribution a { color: var(--dim) !important; }
+    img.heat-raster, .leaflet-image-layer.heat-raster {
+      image-rendering: pixelated;
+      image-rendering: -moz-crisp-edges;
+      image-rendering: crisp-edges;
+    }
     @media (max-width: 620px) {
       #legend { display: none; }
       #bar {
@@ -131,6 +144,7 @@
         display: block; flex: 1 1 100%; order: 10;
         white-space: normal; font-size: 12px; padding: 4px 6px 2px;
       }
+      #timewrap { flex: 1 1 100%; order: 8; padding: 2px 4px 0; min-width: 0; }
       #panel {
         top: auto; bottom: 0; left: 0; right: 0; width: auto;
         max-height: min(58vh, 420px); border-radius: 18px 18px 0 0;
@@ -155,10 +169,15 @@
       <option value="aestivalis">Estatino</option>
       <option value="aereus">Nero</option>
     </select>
+    <div id="timewrap">
+      <input id="day" type="range" min="0" max="2" value="0" step="1" aria-label="giorno heatmap" />
+      <span id="daylab">Oggi</span>
+    </div>
     <span id="spin" hidden aria-label="calcolo heatmap"></span>
     <button id="refresh" type="button" class="ghost">Aggiorna</button>
     <button id="bull" type="button" class="ghost">Mostra Bollettini</button>
     <button id="best" type="button" class="ghost">Mostra Zone Migliori</button>
+    <select id="bestday" hidden aria-label="giorno zone migliori"></select>
     <span id="status"></span>
   </div>
   <div id="legend" class="card">
@@ -182,6 +201,7 @@
     const bestShapes = L.layerGroup().addTo(map);
     const pins = L.layerGroup().addTo(map);
     let baseSheet = null;
+    let heatLayer = null;
     let detailSheet = null;
     let baseCover = null;
     let baseZoom = 0;
@@ -205,6 +225,8 @@
     };
     let bulletOn = false;
     let bestOn = false;
+    let dayOffset = 0;
+    let bestDayOffset = 0;
     const bestRegions = new Map();
     let timer = null;
     let inflight = null;
@@ -218,6 +240,113 @@
       lascia: ["Lascia", "Oggi non è la giornata."],
       prudenza: ["Incerto", "Manca un dato, non forzare."]
     };
+
+    function addDaysIso(iso, n) {
+      const d = iso ? new Date(iso + "T12:00:00") : new Date();
+      d.setHours(12, 0, 0, 0);
+      d.setDate(d.getDate() + n);
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, "0");
+      const day = String(d.getDate()).padStart(2, "0");
+      return `${y}-${m}-${day}`;
+    }
+
+    function horizonStart() {
+      if (CDN && CDN.meta && CDN.meta.horizon_start) return CDN.meta.horizon_start;
+      return addDaysIso(null, 0);
+    }
+
+    function horizonIso(i) {
+      return addDaysIso(horizonStart(), i);
+    }
+
+    function nHorizon() {
+      if (CDN && CDN.grid && CDN.grid.nDays) return CDN.grid.nDays;
+      return 3;
+    }
+
+    function horizonLabels() {
+      const start = horizonStart();
+      const d2 = new Date(start + "T12:00:00");
+      d2.setDate(d2.getDate() + 2);
+      const d2lab = d2.toLocaleDateString("it-IT", { weekday: "short", day: "numeric", month: "short" });
+      return ["Oggi", "Domani", d2lab];
+    }
+
+    function stampHorizon(h) {
+      if (!Array.isArray(h)) return [];
+      return h.map((d, i) => ({ ...d, date: d.date || horizonIso(i) }));
+    }
+
+    function pickHorizon(v, offset) {
+      const h = stampHorizon(v && v.horizon);
+      if (h[offset]) {
+        return {
+          stage: h[offset].stage,
+          p: h[offset].p,
+          date: h[offset].date,
+          forecast: offset > 0 || !!h[offset].forecast
+        };
+      }
+      if (offset === 0) return { stage: v.stage, p: v.p, forecast: false };
+      return { stage: v.stage || 0, p: v.p || 0, forecast: offset > 0 };
+    }
+
+    function bestDateFromHorizon(h) {
+      const rows = stampHorizon(h);
+      if (rows.length < 2) return null;
+      let best = 0;
+      for (let i = 1; i < rows.length; i++) {
+        const ds = (rows[i].stage || 0) - (rows[best].stage || 0);
+        const dp = (rows[i].p || 0) - (rows[best].p || 0);
+        if (ds > 0 || (ds === 0 && dp > 0.04)) best = i;
+      }
+      if (best === 0) return null;
+      return rows[best].date || horizonIso(best);
+    }
+
+    function fillTimeControls() {
+      const labs = horizonLabels();
+      const n = nHorizon();
+      const slider = document.getElementById("day");
+      const lab = document.getElementById("daylab");
+      const sel = document.getElementById("bestday");
+      slider.max = String(Math.max(0, n - 1));
+      slider.disabled = n <= 1;
+      dayOffset = Math.max(0, Math.min(n - 1, dayOffset));
+      bestDayOffset = dayOffset;
+      slider.value = String(dayOffset);
+      lab.textContent = labs[dayOffset] || "Oggi";
+      sel.innerHTML = labs.slice(0, n).map((t, i) => `<option value="${i}">${t}</option>`).join("");
+      sel.value = String(dayOffset);
+    }
+
+    function setDay(offset) {
+      const n = nHorizon();
+      const next = Math.max(0, Math.min(n - 1, Number(offset) || 0));
+      dayOffset = next;
+      bestDayOffset = next;
+      const slider = document.getElementById("day");
+      const sel = document.getElementById("bestday");
+      slider.value = String(next);
+      document.getElementById("daylab").textContent = horizonLabels()[next] || "Oggi";
+      if (sel.options.length) sel.value = String(next);
+      const paint = paintForDay();
+      if (bestOn && bestRegions.size) {
+        const keys = [...bestRegions.keys()];
+        clearBest();
+        keys.forEach(addRegion);
+      }
+      return paint;
+    }
+
+    function paintForDay() {
+      dropDetail();
+      if (CDN && CDN.grid) return loadView(false);
+      applySpeciesCells();
+      paintLayer(baseCells, baseStep, "base");
+      return Promise.resolve();
+    }
 
     function paintLayer(list, gridStep, which) {
       if (which === "base" && baseSheet) {
@@ -234,7 +363,7 @@
       list.forEach((c) => {
         const iy = Math.round(c.lat / gridStep);
         const ix = Math.round(c.lon / gridStep);
-        grid.set(iy + "," + ix, c.stage == null ? 0 : c.stage);
+        grid.set(iy + "," + ix, { stage: c.stage == null ? 0 : c.stage, p: c.p || 0 });
         if (c.lat < minLat) minLat = c.lat;
         if (c.lat > maxLat) maxLat = c.lat;
         if (c.lon < minLon) minLon = c.lon;
@@ -246,28 +375,21 @@
       const x1 = Math.round(maxLon / gridStep);
       const nh = y1 - y0 + 1;
       const nw = x1 - x0 + 1;
-      const scale = 10;
+      const scale = 8;
       const canvas = document.createElement("canvas");
       canvas.width = Math.max(1, nw * scale);
       canvas.height = Math.max(1, nh * scale);
       const ctx = canvas.getContext("2d");
-      const radius = scale * 1.15;
+      ctx.imageSmoothingEnabled = false;
       for (let y = 0; y < nh; y++) {
         for (let x = 0; x < nw; x++) {
-          const stage = grid.get((y0 + y) + "," + (x0 + x));
-          if (stage == null) continue;
-          const [r, g, b, a] = STAGE[stage] || STAGE[0];
-          const cx = (x + 0.5) * scale;
-          const cy = (nh - 1 - y + 0.5) * scale;
-          const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
-          const base = `${r},${g},${b}`;
-          grad.addColorStop(0, `rgba(${base},${(a / 255) * 0.72})`);
-          grad.addColorStop(0.55, `rgba(${base},${(a / 255) * 0.45})`);
-          grad.addColorStop(1, `rgba(${base},0)`);
-          ctx.fillStyle = grad;
-          ctx.beginPath();
-          ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-          ctx.fill();
+          const rec = grid.get((y0 + y) + "," + (x0 + x));
+          if (rec == null) continue;
+          const stage = rec.stage == null ? rec : rec.stage;
+          if (stage <= 0) continue;
+          const [r, g, b] = STAGE[stage] || STAGE[1];
+          ctx.fillStyle = `rgb(${r},${g},${b})`;
+          ctx.fillRect(x * scale, (nh - 1 - y) * scale, scale, scale);
         }
       }
       const south = (y0 - 0.5) * gridStep;
@@ -275,8 +397,9 @@
       const west = (x0 - 0.5) * gridStep;
       const east = (x1 + 0.5) * gridStep;
       const layer = L.imageOverlay(canvas.toDataURL("image/png"), [[south, west], [north, east]], {
-        opacity: 1,
-        interactive: false
+        opacity: 0.42,
+        interactive: false,
+        className: "heat-raster"
       }).addTo(map);
       const box = { s: south, w: west, n: north, e: east };
       if (which === "base") {
@@ -326,11 +449,19 @@
       if (c.desiccation != null && c.desiccation < 0.92) {
         tags.push(`desiccazione ×${c.desiccation.toFixed(2)}`);
       }
-      const when = c.best_date && c.stage < 4 ? `Giorno migliore: ${dayLabel(c.best_date)}.` : "";
+      if (c.forecast || dayOffset > 0) tags.push("tendenza");
+      const lookIso = c.date || horizonIso(dayOffset);
+      const bestIso = c.best_date || bestDateFromHorizon(c.horizon);
+      const when = bestIso && bestIso !== lookIso ? `Giorno migliore: ${dayLabel(bestIso)}.` : "";
+      let blurb = pair[1];
+      if (c.forecast || dayOffset > 0) {
+        const whenLab = horizonLabels()[dayOffset] || dayLabel(lookIso);
+        blurb = `Tendenza ${whenLab}: ${pair[1]}`;
+      }
       panel.innerHTML = `
         <span class="chip" style="background:${STAGE_CSS[c.stage] || "var(--dim)"}">${pair[0]}</span>
         <p class="word">${Math.round((c.p || 0) * 100)}<span style="font-size:18px;font-weight:600">% probabilità</span></p>
-        <p class="sub">${pair[1]} ${when}</p>
+        <p class="sub">${blurb} ${when}</p>
         <div class="meta">${tags.map((t) => `<span class="tag">${t}</span>`).join("")}</div>
         <div id="verdict" class="verdict assente"><strong>Bollettini…</strong><p>cerco osservazioni pubbliche vicine</p></div>
         <div class="rowbtn">
@@ -596,12 +727,12 @@
       if (!reg) return [];
       if (CDN && CDN.grid) {
         const sp = document.getElementById("species").value;
-        return PorciniHeat.cellsInRegion(CDN.grid, sp, pointInRegion, reg)
+        return PorciniHeat.cellsInRegion(CDN.grid, sp, pointInRegion, reg, null, bestDayOffset)
           .sort(byRank)
           .slice(0, 5);
       }
       const sp2 = document.getElementById("species").value;
-      const src = flattenCells(baseBundle.length ? baseBundle : (baseCells.length ? baseCells : cells), sp2);
+      const src = flattenCells(baseBundle.length ? baseBundle : (baseCells.length ? baseCells : cells), sp2, bestDayOffset);
       return src
         .filter((c) => (c.stage || 0) > 0 && pointInRegion(c.lat, c.lon, reg))
         .sort(byRank)
@@ -691,9 +822,11 @@
 
     async function showBestZones() {
       const btn = document.getElementById("best");
+      const sel = document.getElementById("bestday");
       if (bestOn) {
         bestOn = false;
         btn.classList.add("ghost");
+        sel.hidden = true;
         clearBest();
         if (!bulletOn) say("");
         return;
@@ -723,6 +856,8 @@
       }
       bestOn = true;
       btn.classList.remove("ghost");
+      fillTimeControls();
+      sel.hidden = false;
       say("clicca una regione");
     }
 
@@ -745,13 +880,20 @@
     let detailBundle = [];
     let baseStep = 0.05;
 
-    function flattenCells(bundle, sp) {
+    function flattenCells(bundle, sp, offset) {
+      const off = offset == null ? dayOffset : offset;
       if (!bundle.length) return [];
-      if (!bundle[0].by) return bundle;
+      if (!bundle[0].by) {
+        return bundle.map((c) => {
+          const picked = pickHorizon(c, off);
+          return { ...c, ...picked, horizon: stampHorizon(c.horizon) };
+        });
+      }
       return bundle.map((c) => {
         const v = c.by[sp] || {};
         const { by, ...rest } = c;
-        return { ...rest, ...v };
+        const picked = pickHorizon(v, off);
+        return { ...rest, ...v, ...picked, horizon: stampHorizon(v.horizon || c.horizon) };
       });
     }
 
@@ -779,23 +921,33 @@
         setHeatBusy(true);
         try {
           const sp = document.getElementById("species").value;
-          const b = detail ? paddedBounds() : BASE_BOX;
-          const maxPts = detail ? 6000 : 5000;
-          const sampled = PorciniHeat.sampleCells(CDN.grid, b, sp, maxPts);
-          cells = sampled.cells;
-          step = sampled.step || CDN.grid.step;
-          if (!detail) {
-            baseCells = cells;
-            baseStep = step;
-            baseBundle = [];
-          } else {
+          if (baseSheet) {
+            map.removeLayer(baseSheet);
+            baseSheet = null;
+          }
+          if (detailSheet) {
+            map.removeLayer(detailSheet);
+            detailSheet = null;
             detailBundle = [];
           }
-          paintLayer(cells, step, detail ? "detail" : "base");
+          if (!heatLayer) {
+            heatLayer = PorciniHeat.makeLayer(CDN.grid, STAGE);
+            heatLayer.setQuery(sp, dayOffset);
+            heatLayer.addTo(map);
+          } else {
+            heatLayer.setQuery(sp, dayOffset);
+          }
+          step = CDN.grid.step;
+          baseStep = step;
+          baseCells = [];
+          cells = [];
+          baseCover = { s: CDN.grid.south, w: CDN.grid.west, n: CDN.grid.north, e: CDN.grid.east };
+          baseZoom = map.getZoom();
           const age = CDN.meta && CDN.meta.fetched_at
             ? new Date(CDN.meta.fetched_at).toLocaleString("it-IT", { hour: "2-digit", minute: "2-digit", day: "numeric", month: "short" })
             : "";
-          say(age ? `dati ${age}` : "");
+          const dayNote = dayOffset > 0 ? (horizonLabels()[dayOffset] || "") + " · tendenza" : "";
+          say([dayNote, age ? `dati ${age}` : ""].filter(Boolean).join(" · "));
         } finally {
           setHeatBusy(false);
         }
@@ -826,6 +978,7 @@
           cells = baseCells;
         }
         say("");
+        if (dayOffset > 0) say((horizonLabels()[dayOffset] || "") + " · tendenza");
         paintLayer(cells, step, detail ? "detail" : "base");
       } catch (err) {
         if (err.name !== "AbortError") say("riprova tra poco");
@@ -845,8 +998,8 @@
     }
 
     function maybeRefine() {
+      if (CDN && CDN.grid) return;
       if (!weatherReady || !baseCover) return;
-      if (!(CDN && CDN.grid)) return;
       if (map.getZoom() < baseZoom + 2) {
         clearTimeout(timer);
         dropDetail();
@@ -910,8 +1063,13 @@
 
     async function loadCdn() {
       say("carico mappa…", true);
+      if (heatLayer) {
+        map.removeLayer(heatLayer);
+        heatLayer = null;
+      }
       CDN = await PorciniHeat.loadBundle(ASSET_BASE);
       weatherReady = true;
+      fillTimeControls();
       await loadView(false);
       return true;
     }
@@ -1024,6 +1182,7 @@
     }
 
     async function boot() {
+      fillTimeControls();
       const live = await serverStatus();
       if (live && live.server_calc) {
         const done = await waitCalc();
@@ -1070,6 +1229,7 @@
       if (bestOn) {
         bestOn = false;
         document.getElementById("best").classList.add("ghost");
+        document.getElementById("bestday").hidden = true;
         clearBest();
       }
       say("bollettini", true);
@@ -1135,6 +1295,12 @@
       clearBest();
       keys.forEach(addRegion);
     };
+    document.getElementById("day").oninput = () => {
+      setDay(document.getElementById("day").value);
+    };
+    document.getElementById("bestday").onchange = () => {
+      setDay(document.getElementById("bestday").value);
+    };
     document.getElementById("refresh").onclick = () => refresh();
     document.getElementById("bull").onclick = showBulletins;
     document.getElementById("best").onclick = showBestZones;
@@ -1148,12 +1314,13 @@
       const lon = e.latlng.lng;
       const species = document.getElementById("species").value;
       if (CDN && CDN.grid) {
-        const cell = PorciniHeat.latLonToCell(CDN.grid, lat, lon);
+        const cell = PorciniHeat.latLonToCell(CDN.grid, lat, lon, dayOffset);
         if (!cell) {
           say("nessun dato qui");
           return;
         }
         const v = cell.by[species] || { stage: 0, p: 0 };
+        const horizon = stampHorizon(v.horizon);
         openCell({
           lat: cell.lat,
           lon: cell.lon,
@@ -1162,6 +1329,10 @@
           leaf_note: cell.leaf,
           stage: v.stage,
           p: v.p,
+          horizon,
+          forecast: dayOffset > 0,
+          date: horizonIso(dayOffset),
+          best_date: bestDateFromHorizon(horizon),
           decision: v.stage >= 4 ? "vai" : v.stage >= 2 ? "aspetta" : "lascia"
         });
         return;

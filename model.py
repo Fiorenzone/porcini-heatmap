@@ -1,15 +1,14 @@
 """Indice porcini: P(buttata) e abbondanza. Parametri dai paper, non un voto unico.
 
-Lo stadio e la decisione sono nowcast: solo giorni già osservati. I giorni
-di forecast restano nella serie come tendenza e non cambiano il colore.
-Pioggia, shock e danno da vento secco sono integratori leaky: un evento
-decade, non esce da una finestra rigida a mezzanotte.
+Lo stadio e la decisione di *oggi* sono nowcast: solo giorni già osservati.
+D+1 e D+2 restano in serie come tendenza (slider): non promuovono il colore
+di oggi. Pioggia, shock e danno da vento secco sono integratori leaky.
 """
 
 from __future__ import annotations
 
 import math
-from datetime import date, timedelta
+from datetime import date
 
 SPECIES = {
     "edulis": {
@@ -44,6 +43,7 @@ SPECIES = {
 
 P_VAI = 0.55
 A_VAI = 45.0
+HORIZON_DAYS = 3
 
 # Memorie (giorni). Con ~26 gg di storico il bordo della serie pesa già e^(-26/τ).
 _TAU_RAIN = 12.0
@@ -429,7 +429,8 @@ def _abund_gate(p: float) -> float:
 def _stage(hab: float, today: dict) -> int:
     """1 idonea ferma, 2 incubazione, 3 avvio, 4 buona, 5 eccezionale. 0 = habitat chiuso.
 
-    Solo il giorno osservato. Un forecast più alto non promuove lo stadio.
+    Stesso criterio su ogni giorno della serie. Il colore di *oggi* usa solo il
+    giorno osservato; D+1/D+2 sono tendenza se il meteo di oggi tiene.
     """
     if hab <= 0:
         return 0
@@ -504,45 +505,39 @@ def score_series(
         # Carpofori esposti: stessa domanda evaporativa taglia anche abbondanza utile
         abund *= 0.55 + 0.45 * dry
         abund *= _abund_gate(p)
-        out_days.append(
-            {
-                "date": past[-1].get("date"),
-                "p": round(p, 3),
-                "abundance": round(abund, 1),
-                "t": None if tmean is None else round(tmean, 1),
-                "shock": round(shock, 2),
-                "forecast": idx > today_index,
-                "swc": round(swc, 3),
-                "rain26": round(rain26, 1),
-                "since_rain": since,
-                "incub": round(incub, 2),
-                "vpd": dry_meta.get("vpd"),
-                "wind_ms": dry_meta.get("wind_ms"),
-                "evap_demand": dry_meta.get("evap_demand"),
-                "desiccation": dry_meta.get("desiccation"),
-                "dry_wind": dry_meta.get("dry_wind"),
-            }
-        )
+        day_row = {
+            "date": past[-1].get("date"),
+            "p": round(p, 3),
+            "abundance": round(abund, 1),
+            "t": None if tmean is None else round(tmean, 1),
+            "shock": round(shock, 2),
+            "forecast": idx > today_index,
+            "swc": round(swc, 3),
+            "rain26": round(rain26, 1),
+            "since_rain": since,
+            "incub": round(incub, 2),
+            "vpd": dry_meta.get("vpd"),
+            "wind_ms": dry_meta.get("wind_ms"),
+            "evap_demand": dry_meta.get("evap_demand"),
+            "desiccation": dry_meta.get("desiccation"),
+            "dry_wind": dry_meta.get("dry_wind"),
+        }
+        day_row["stage"] = _stage(hab, day_row)
+        out_days.append(day_row)
     if not out_days:
         return {"decision": "prudenza", "days": [], "incomplete": True}
     today = out_days[0]
-    # Data del picco dall'orologio storico (since → picco di versante).
-    # Non è l'argmax dei giorni di forecast: quel massimo sparisce se GFS corregge la pioggia.
-    peak_date = None
-    since_now = today.get("since_rain")
-    if (
-        since_now is not None
-        and today.get("date")
-        and (today.get("incub") or 0) >= 0.25
-        and since_now < _incub_peak(aspect, slope) - 0.5
-    ):
-        try:
-            base = date.fromisoformat(str(today["date"])[:10])
-            ahead = int(round(_incub_peak(aspect, slope) - since_now))
-            peak_date = (base + timedelta(days=ahead)).isoformat()
-        except ValueError:
-            peak_date = None
-    best = {"date": peak_date, "p": today["p"]} if peak_date else {}
+    # Picco nel finestra oggi…D+2. Non i 14 giorni GFS: troppo ballerini.
+    window = out_days[:HORIZON_DAYS]
+    best_day = max(
+        window,
+        key=lambda d: ((d.get("stage") or 0), (d.get("p") or 0), (d.get("abundance") or 0)),
+    )
+    later = best_day.get("date") != today.get("date")
+    richer = (best_day.get("stage") or 0) > (today.get("stage") or 0) or (
+        (best_day.get("p") or 0) > (today.get("p") or 0) + 0.04
+    )
+    best = dict(best_day) if later and richer else {}
     if hab == 0 or today["t"] is None:
         decision = "lascia" if hab == 0 else "prudenza"
     elif today["p"] >= P_VAI and today["abundance"] >= A_VAI:
@@ -553,7 +548,7 @@ def score_series(
         decision = "lascia"
     if incomplete and decision == "vai":
         decision = "prudenza"
-    stage = _stage(hab, today)
+    stage = today.get("stage") or _stage(hab, today)
     return {
         "decision": decision,
         "stage": stage,
@@ -561,6 +556,16 @@ def score_series(
         "host_hit": host_hit,
         "today": today,
         "best": best,
+        "horizon": [
+            {
+                "date": d.get("date"),
+                "p": d.get("p"),
+                "stage": d.get("stage") or 0,
+                "forecast": bool(d.get("forecast")),
+                "abundance": d.get("abundance"),
+            }
+            for d in out_days[:HORIZON_DAYS]
+        ],
         "days": out_days,
         "habitat": round(hab, 2),
         "soil": soil_class,

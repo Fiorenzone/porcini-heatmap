@@ -1,6 +1,5 @@
-/** Lettore PORCHMAP1 + paint canvas da binario precalcolato. */
+/** Lettore PORCAMP1 / PORCAMP2 + paint canvas da binario precalcolato. */
 (function (global) {
-  const MAGIC = "PORCAMP1";
   const LEAF = { 0: "fuori", 1: "altro", 2: "latifoglie", 3: "conifere", 4: "misto" };
 
   async function gunzip(buf) {
@@ -18,7 +17,7 @@
     const copy = src.buffer.slice(src.byteOffset, src.byteOffset + src.byteLength);
     const u8 = new Uint8Array(copy);
     const magic = String.fromCharCode(...u8.slice(0, 8));
-    if (magic !== MAGIC) throw new Error("magic heatmap");
+    if (magic !== "PORCAMP1" && magic !== "PORCAMP2") throw new Error("magic heatmap");
     const dv = new DataView(copy);
     const south = dv.getFloat64(8, true);
     const west = dv.getFloat64(16, true);
@@ -29,6 +28,7 @@
     const ncols = dv.getUint32(52, true);
     const nsp = u8[56];
     const cellBytes = u8[57];
+    const nDays = magic === "PORCAMP2" ? Math.max(1, u8[58] || (meta.n_days || 1)) : 1;
     const header = meta.header_bytes || 64;
     const species = meta.species || ["edulis", "pinophilus", "aestivalis", "aereus"];
     return {
@@ -43,68 +43,141 @@
       ncols,
       nsp,
       cellBytes,
+      nDays,
       header,
       species,
+      horizon_start: meta.horizon_start || null,
       fetched_at: meta.fetched_at
     };
   }
 
-  function cellAt(grid, row, col) {
+  function speciesDay(grid, off, s, d) {
+    const o = off + 3 + (s * grid.nDays + d) * 2;
+    return { stage: grid.u8[o], p: grid.u8[o + 1] / 100 };
+  }
+
+  function edgeSouth(grid) {
+    return grid.south - grid.step / 2;
+  }
+
+  function edgeWest(grid) {
+    return grid.west - grid.step / 2;
+  }
+
+  function rcAt(grid, lat, lon) {
+    const row = Math.floor((lat - edgeSouth(grid)) / grid.step);
+    const col = Math.floor((lon - edgeWest(grid)) / grid.step);
+    if (row < 0 || col < 0 || row >= grid.nrows || col >= grid.ncols) return null;
+    return [row, col];
+  }
+
+  function cellAt(grid, row, col, dayOffset) {
     if (row < 0 || col < 0 || row >= grid.nrows || col >= grid.ncols) return null;
     const off = grid.header + (row * grid.ncols + col) * grid.cellBytes;
     const elev = grid.dv.getInt16(off, true);
     if (elev === -32768) return null;
     const leaf = grid.u8[off + 2];
+    const nDays = grid.nDays || 1;
+    const day = Math.max(0, Math.min(nDays - 1, dayOffset || 0));
     const by = {};
     for (let s = 0; s < grid.nsp; s++) {
-      const o = off + 3 + s * 2;
-      by[grid.species[s]] = { stage: grid.u8[o], p: grid.u8[o + 1] / 100 };
+      const horizon = [];
+      for (let d = 0; d < nDays; d++) horizon.push(speciesDay(grid, off, s, d));
+      const now = horizon[day] || horizon[0];
+      by[grid.species[s]] = { stage: now.stage, p: now.p, horizon };
     }
     const lat = grid.south + row * grid.step;
     const lon = grid.west + col * grid.step;
     return { lat, lon, elev, leaf: LEAF[leaf] || "altro", leaf_code: leaf, by };
   }
 
-  function latLonToCell(grid, lat, lon) {
-    const row = Math.round((lat - grid.south) / grid.step);
-    const col = Math.round((lon - grid.west) / grid.step);
-    return cellAt(grid, row, col);
+  function latLonToCell(grid, lat, lon, dayOffset) {
+    const rc = rcAt(grid, lat, lon);
+    if (!rc) return null;
+    return cellAt(grid, rc[0], rc[1], dayOffset);
   }
 
-  function sampleCells(grid, bounds, species, maxPts) {
-    const pad = grid.step;
-    const r0 = Math.max(0, Math.floor((bounds.s - pad - grid.south) / grid.step));
-    const r1 = Math.min(grid.nrows - 1, Math.ceil((bounds.n + pad - grid.south) / grid.step));
-    const c0 = Math.max(0, Math.floor((bounds.w - pad - grid.west) / grid.step));
-    const c1 = Math.min(grid.ncols - 1, Math.ceil((bounds.e + pad - grid.west) / grid.step));
-    const rows = Math.max(1, r1 - r0 + 1);
-    const cols = Math.max(1, c1 - c0 + 1);
-    let stride = 1;
-    while ((rows / stride) * (cols / stride) > maxPts) stride *= 2;
-    const out = [];
-    const rStart = r0 + ((stride - (r0 % stride)) % stride);
-    const cStart = c0 + ((stride - (c0 % stride)) % stride);
-    for (let r = rStart; r <= r1; r += stride) {
-      for (let c = cStart; c <= c1; c += stride) {
-        const cell = cellAt(grid, r, c);
-        if (!cell) continue;
-        const v = cell.by[species] || { stage: 0, p: 0 };
-        out.push({
-          lat: cell.lat,
-          lon: cell.lon,
-          elev: cell.elev,
-          leaf: cell.leaf,
-          leaf_note: cell.leaf,
-          stage: v.stage,
-          p: v.p,
-          decision: v.stage >= 4 ? "vai" : v.stage >= 2 ? "aspetta" : "lascia"
-        });
+  function stageAt(grid, row, col, spIdx, day) {
+    const off = grid.header + (row * grid.ncols + col) * grid.cellBytes;
+    if (grid.dv.getInt16(off, true) === -32768) return null;
+    const nDays = grid.nDays || 1;
+    const o = off + 3 + (spIdx * nDays + day) * 2;
+    return { stage: grid.u8[o], p: grid.u8[o + 1] / 100 };
+  }
+
+  function makeLayer(grid, stageRgba) {
+    const Heat = L.GridLayer.extend({
+      options: {
+        opacity: 0.42,
+        updateWhenZooming: false,
+        keepBuffer: 1
+      },
+      initialize: function (g, rgba) {
+        L.GridLayer.prototype.initialize.call(this, {});
+        this._g = g;
+        this._rgba = rgba;
+        this._sp = 0;
+        this._day = 0;
+      },
+      setQuery: function (species, day) {
+        this._sp = Math.max(0, this._g.species.indexOf(species));
+        this._day = Math.max(0, Math.min((this._g.nDays || 1) - 1, day || 0));
+        if (this._map) this.redraw();
+      },
+      createTile: function (coords) {
+        const g = this._g;
+        const tile = L.DomUtil.create("canvas", "leaflet-tile");
+        const size = this.getTileSize();
+        tile.width = size.x;
+        tile.height = size.y;
+        const ctx = tile.getContext("2d");
+        const map = this._map;
+        if (!map) return tile;
+        const z = coords.z;
+        const ox = coords.x * size.x;
+        const oy = coords.y * size.y;
+        const nw = map.unproject(L.point(ox, oy), z);
+        const se = map.unproject(L.point(ox + size.x, oy + size.y), z);
+        const pad = g.step;
+        const south = Math.min(nw.lat, se.lat) - pad;
+        const north = Math.max(nw.lat, se.lat) + pad;
+        const west = Math.min(nw.lng, se.lng) - pad;
+        const east = Math.max(nw.lng, se.lng) + pad;
+        const es = edgeSouth(g);
+        const ew = edgeWest(g);
+        const r0 = Math.max(0, Math.floor((south - es) / g.step));
+        const r1 = Math.min(g.nrows - 1, Math.floor((north - es) / g.step));
+        const c0 = Math.max(0, Math.floor((west - ew) / g.step));
+        const c1 = Math.min(g.ncols - 1, Math.floor((east - ew) / g.step));
+        const sp = this._sp;
+        const day = this._day;
+        const rgbaMap = this._rgba;
+        for (let r = r0; r <= r1; r++) {
+          const lat0 = es + r * g.step;
+          const lat1 = lat0 + g.step;
+          for (let c = c0; c <= c1; c++) {
+            const st = stageAt(g, r, c, sp, day);
+            if (!st || st.stage <= 0) continue;
+            const lon0 = ew + c * g.step;
+            const lon1 = lon0 + g.step;
+            const p0 = map.project([lat0, lon0], z);
+            const p1 = map.project([lat1, lon1], z);
+            const x = p0.x - ox;
+            const y = p1.y - oy;
+            const rw = p1.x - p0.x;
+            const rh = p0.y - p1.y;
+            const rgba = rgbaMap[st.stage] || rgbaMap[1];
+            ctx.fillStyle = "rgb(" + rgba[0] + "," + rgba[1] + "," + rgba[2] + ")";
+            ctx.fillRect(x, y, rw + 0.6, rh + 0.6);
+          }
+        }
+        return tile;
       }
-    }
-    return { cells: out, stride, step: grid.step * stride };
+    });
+    return new Heat(grid, stageRgba);
   }
 
-  function cellsInRegion(grid, species, pointInRegion, reg, limitScan) {
+  function cellsInRegion(grid, species, pointInRegion, reg, limitScan, dayOffset) {
     const out = [];
     const b = reg.bbox;
     const r0 = Math.max(0, Math.floor((b.s - grid.south) / grid.step));
@@ -112,9 +185,10 @@
     const c0 = Math.max(0, Math.floor((b.w - grid.west) / grid.step));
     const c1 = Math.min(grid.ncols - 1, Math.ceil((b.e - grid.west) / grid.step));
     let n = 0;
+    const day = dayOffset || 0;
     for (let r = r0; r <= r1; r++) {
       for (let c = c0; c <= c1; c++) {
-        const cell = cellAt(grid, r, c);
+        const cell = cellAt(grid, r, c, day);
         if (!cell) continue;
         if (!pointInRegion(cell.lat, cell.lon, reg)) continue;
         const v = cell.by[species] || { stage: 0, p: 0 };
@@ -126,7 +200,9 @@
           leaf: cell.leaf,
           leaf_note: cell.leaf,
           stage: v.stage,
-          p: v.p
+          p: v.p,
+          horizon: v.horizon,
+          forecast: day > 0
         });
         n++;
         if (limitScan && n > limitScan) break;
@@ -151,7 +227,7 @@
 
   global.PorciniHeat = {
     loadBundle,
-    sampleCells,
+    makeLayer,
     latLonToCell,
     cellsInRegion,
     gunzip

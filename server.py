@@ -99,6 +99,7 @@ def _scored_slice(scored: dict) -> dict:
         "t": today.get("t"),
         "shock": today.get("shock"),
         "best_date": (scored.get("best") or {}).get("date"),
+        "horizon": scored.get("horizon") or [],
         "habitat": scored.get("habitat"),
         "host": scored.get("host"),
         "host_hit": scored.get("host_hit"),

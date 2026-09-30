@@ -31,13 +31,14 @@ import forest_grid
 import soil_grid
 import weather
 from geo import idw_daily, in_italy, slope_aspect_twi
-from model import forest_proxy, score_series
+from model import forest_proxy, score_series, HORIZON_DAYS
 
 ROOT = Path(__file__).resolve().parent
 OUT = ROOT / "static" / "data"
-MAGIC = b"PORCAMP1"
+MAGIC = b"PORCAMP2"
 HEADER_LEN = 64
-CELL_BYTES = 11  # i16 elev + u8 leaf + 4*(stage,p)
+N_DAYS = HORIZON_DAYS
+CELL_BYTES = 3 + 4 * N_DAYS * 2  # i16 elev + u8 leaf + 4 sp * N_DAYS * (stage,p)
 SPECIES = ("edulis", "pinophilus", "aestivalis", "aereus")
 ITALY = (36.6, 6.6, 47.1, 18.5)
 LEAF_CODE = {"altro": 1, "latifoglie": 2, "conifere": 3, "misto": 4}
@@ -83,7 +84,7 @@ def _grid(south: float, west: float, north: float, east: float, step: float):
 
 def _pack_header(south, west, north, east, step, nrows, ncols) -> bytes:
     body = struct.pack(
-        "<5dIIBB",
+        "<5dIIBBB",
         float(south),
         float(west),
         float(north),
@@ -93,6 +94,7 @@ def _pack_header(south, west, north, east, step, nrows, ncols) -> bytes:
         int(ncols),
         len(SPECIES),
         CELL_BYTES,
+        N_DAYS,
     )
     raw = MAGIC + body
     if len(raw) < HEADER_LEN:
@@ -102,14 +104,20 @@ def _pack_header(south, west, north, east, step, nrows, ncols) -> bytes:
     return raw
 
 
+def _pad_sp() -> list[tuple[int, int]]:
+    return [(0, 0)] * (len(SPECIES) * N_DAYS)
+
+
 def _pack_cell(elev, leaf_code: int, by_sp: list[tuple[int, int]]) -> bytes:
-    # elev None → -32768
+    # elev None → -32768. by_sp: species-major, poi giorno (stage, p100).
     ev = -32768 if elev is None else int(max(-32000, min(32000, round(elev))))
     parts = [struct.pack("<hB", ev, leaf_code & 0xFF)]
-    for stage, p100 in by_sp:
+    want = len(SPECIES) * N_DAYS
+    packed = list(by_sp[:want])
+    while len(packed) < want:
+        packed.append((0, 0))
+    for stage, p100 in packed:
         parts.append(struct.pack("BB", stage & 0xFF, p100 & 0xFF))
-    while len(parts) < 1 + len(SPECIES):
-        parts.append(struct.pack("BB", 0, 0))
     return b"".join(parts)
 
 
@@ -175,20 +183,20 @@ def build(*, skip_meteo: bool = False, skip_obs: bool = False) -> dict:
             print(f"  riga {i}/{nrows} filled={filled}", flush=True)
         for lat, lon in row:
             if not in_italy(lat, lon):
-                buf.extend(_pack_cell(None, 0, [(0, 0)] * 4))
+                buf.extend(_pack_cell(None, 0, _pad_sp()))
                 continue
             key = (round(lat, 4), round(lon, 4))
             z = elev_map.get(key)
             if z is None:
                 z = elev_map.get((lat, lon))
             if z is None:
-                buf.extend(_pack_cell(None, 0, [(0, 0)] * 4))
+                buf.extend(_pack_cell(None, 0, _pad_sp()))
                 continue
             slope, aspect, twi = terrain.get(key, (5.0, 180.0, 8.0))
             leaf, leaf_note = _forest_at(lat, lon, z)
             series = idw_daily(stations, lat, lon)
             if not series:
-                buf.extend(_pack_cell(z, LEAF_CODE.get(leaf, 1), [(0, 0)] * 4))
+                buf.extend(_pack_cell(z, LEAF_CODE.get(leaf, 1), _pad_sp()))
                 continue
             label = leaf_note.split(": ")[-1] if leaf_note.startswith("Carta forestale") else None
             series, _arpa_days = arpa_rain.overlay(lat, lon, series)
@@ -215,10 +223,13 @@ def build(*, skip_meteo: bool = False, skip_obs: bool = False) -> dict:
                     cover=cover,
                     heat=heat,
                 )
-                today = scored.get("today") or {}
-                stage = int(scored.get("stage") or 0)
-                p = today.get("p") or 0.0
-                by.append((stage, int(max(0, min(100, round(p * 100))))))
+                horizon = list(scored.get("horizon") or [])
+                while len(horizon) < N_DAYS:
+                    horizon.append({})
+                for d in horizon[:N_DAYS]:
+                    stage = int(d.get("stage") or 0)
+                    p = d.get("p") or 0.0
+                    by.append((stage, int(max(0, min(100, round(p * 100))))))
             buf.extend(_pack_cell(z, LEAF_CODE.get(leaf, 1), by))
             filled += 1
 
@@ -249,8 +260,10 @@ def build(*, skip_meteo: bool = False, skip_obs: bool = False) -> dict:
     (OUT / "bulletins.json").write_text(json.dumps(bulls, ensure_ascii=False))
 
     meta = {
-        "magic": "PORCAMP1",
+        "magic": "PORCAMP2",
         "fetched_at": weather_slim["fetched_at"],
+        "horizon_start": date.today().isoformat(),
+        "n_days": N_DAYS,
         "south": lat0,
         "west": lon0,
         "north": lat0 + (nrows - 1) * step,
