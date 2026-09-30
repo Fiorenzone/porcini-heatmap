@@ -1,9 +1,15 @@
-"""Indice porcini: P(buttata) e abbondanza. Parametri dai paper, non un voto unico."""
+"""Indice porcini: P(buttata) e abbondanza. Parametri dai paper, non un voto unico.
+
+Lo stadio e la decisione sono nowcast: solo giorni già osservati. I giorni
+di forecast restano nella serie come tendenza e non cambiano il colore.
+Pioggia, shock e danno da vento secco sono integratori leaky: un evento
+decade, non esce da una finestra rigida a mezzanotte.
+"""
 
 from __future__ import annotations
 
 import math
-from datetime import date
+from datetime import date, timedelta
 
 SPECIES = {
     "edulis": {
@@ -38,7 +44,12 @@ SPECIES = {
 
 P_VAI = 0.55
 A_VAI = 45.0
-P_ASPETTA = 0.40
+
+# Memorie (giorni). Con ~26 gg di storico il bordo della serie pesa già e^(-26/τ).
+_TAU_RAIN = 12.0
+_TAU_DAMAGE = 6.0
+_TAU_SHOCK = 6.0
+_TAU_ABUND = 10.0
 
 
 def forest_proxy(lat: float, elev: float) -> tuple[str, str]:
@@ -132,6 +143,14 @@ def _mean(vals: list[float]) -> float | None:
     return sum(clean) / len(clean)
 
 
+def _smoothstep(x: float) -> float:
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    return x * x * (3.0 - 2.0 * x)
+
+
 def _therm(tmean: float | None, topt: float) -> float:
     if tmean is None:
         return 0.0
@@ -166,8 +185,55 @@ def _dry_sector(deg: float | None) -> bool | None:
     return d >= 300.0 or d <= 60.0
 
 
+def _triggers(daily: list[float]) -> list[tuple[int, float]]:
+    """Innesco continuo: 0 sotto 10 mm in 3 giorni, saturo da ~22 mm. Niente soglia a 20."""
+    out = []
+    for i in range(len(daily)):
+        block = sum(daily[max(0, i - 2) : i + 1])
+        strength = _smoothstep((block - 10.0) / 12.0)
+        if strength > 0.02:
+            out.append((i, strength))
+    return out
+
+
+def _kernel(age: int, peak: float) -> float:
+    return math.exp(-0.5 * ((age - peak) / 4.0) ** 2)
+
+
+def _best_flush(
+    triggers: list[tuple[int, float]], day_index: int, peak: float
+) -> tuple[int | None, float]:
+    """Max dei kernel: una pioggia nuova non azzera una buttata già in corso."""
+    best_k = 0.0
+    best_age: int | None = None
+    for i, strength in triggers:
+        if i > day_index:
+            break
+        age = day_index - i
+        k = strength * _kernel(age, peak)
+        if k > best_k:
+            best_k = k
+            best_age = age
+    return best_age, best_k
+
+
+def _rain_term(days: list[dict]) -> float:
+    """
+    Somma leaky della pioggia (mm), τ = 12 gg.
+    La scala eguaglia il livello stazionario della vecchia somma rigida 26 gg / 80 mm,
+    così un autunno stabilmente umido non cambia P: cambia solo il bordo.
+    """
+    lam = math.exp(-1.0 / _TAU_RAIN)
+    tau_eff = 1.0 / (1.0 - lam)
+    scale = 80.0 * tau_eff / 26.0
+    acc = 0.0
+    for d in days:
+        acc = lam * acc + float(d.get("precip") or 0.0)
+    return min(1.0, acc / scale)
+
+
 def _desiccation(
-    past: list[dict], leaf: str, since: int | None
+    past: list[dict], leaf: str, aspect: float, slope: float
 ) -> tuple[float, dict]:
     """
     Moltiplicatore su P da domanda evaporativa al suolo/sporocarpo.
@@ -179,93 +245,98 @@ def _desiccation(
       qui NON moltiplichiamo di nuovo ET0 (evita doppio conteggio).
     - Karavani / Ogaya: umidità suolo + domanda evaporativa > pioggia grezza.
 
-    Finestra: peso massimo quando i primordia/carpofori sono esposti (5–16 gg post-innesco).
+    Lo stress entra in un integratore leaky (τ = 6 gg). Un giorno di tramontana
+    sposta il danno di poco; una settimana lo porta verso il pavimento 0.35.
+    Il recupero ha la stessa memoria. Niente soglia su settore, vento o giorno 16.
+    L'esposizione segue il kernel di incubazione (primordi fuori), non uno scalino.
     """
-    meta = {"vpd": None, "wind_ms": None, "evap_demand": None, "desiccation": 1.0}
-    recent = past[-3:] if len(past) >= 3 else past
-    if not recent:
+    meta = {"vpd": None, "wind_ms": None, "evap_demand": None, "desiccation": 1.0, "dry_wind": None}
+    if not past:
         return 1.0, meta
 
     shelter = _canopy_wind_frac(leaf)
-    vpds: list[float] = []
-    us: list[float] = []
-    gusts: list[float] = []
-    dry_flags: list[float] = []
-    for d in recent:
+    peak = _incub_peak(aspect, slope)
+    triggers = _triggers([(d.get("precip") or 0) for d in past])
+    lam = math.exp(-1.0 / _TAU_DAMAGE)
+    damage = 0.0
+    vpd_e = 0.0
+    wind_e = 0.0
+    dem_e = 0.0
+    dry_e = 0.0
+    have_vpd = False
+    have_dry = False
+
+    for i, d in enumerate(past):
         v = _vpd_kpa(d.get("tmean"), d.get("rh"))
-        if v is not None:
-            vpds.append(v)
-        # vento sotto chioma ≈ frazione del max giornaliero a 10 m
-        us.append(_wind_ms(d.get("wind")) * shelter)
-        gusts.append(_wind_ms(d.get("gust")) * shelter)
+        u = _wind_ms(d.get("wind")) * shelter
+        gust_u = _wind_ms(d.get("gust")) * shelter
+        wind_u = max(u, gust_u)
         flag = _dry_sector(d.get("wdir"))
+        dry = 0.0 if flag is None else (1.0 if flag else 0.0)
         if flag is not None:
-            dry_flags.append(1.0 if flag else 0.0)
+            have_dry = True
+        if v is None:
+            damage *= lam
+            continue
+        have_vpd = True
+        aero = u / (u + 1.4)
+        demand = v * (0.50 + 0.95 * aero)
+        factor = 1.0 / (1.0 + (demand / 1.30) ** 2.3)
+        factor = max(0.42, min(1.0, factor))
+        wind_hit = dry * _smoothstep((wind_u - 0.8) / 3.2)
+        _age, flush = _best_flush(triggers, i, peak)
+        exposure = 0.25 + 0.75 * flush
+        stress = exposure * (0.70 * (1.0 - factor) + 0.30 * wind_hit)
+        damage = lam * damage + (1.0 - lam) * stress
+        vpd_e = lam * vpd_e + (1.0 - lam) * v
+        wind_e = lam * wind_e + (1.0 - lam) * u
+        dem_e = lam * dem_e + (1.0 - lam) * demand
+        dry_e = lam * dry_e + (1.0 - lam) * dry
 
-    if not vpds:
+    if not have_vpd:
         return 1.0, meta
-
-    vpd = sum(vpds) / len(vpds)
-    u = sum(us) / len(us)
-    # Conductance aerodinamica normalizzata: g_a ∝ u/(u+u0), u0 tipico understory
-    aero = u / (u + 1.4)
-    # Domanda evaporativa effettiva (kPa-eq): VPD amplificato dal rimescolamento
-    # (0.50 vs quiete → fino a ~1.45× con vento forte sottobosco)
-    demand = vpd * (0.50 + 0.95 * aero)
-
-    # Fattore continuo: ~1 a domanda bassa/media autunnale; cala sopra ~1.2–1.4 kPa-eq
-    # Forma: 1 / (1 + (D/D0)^n) — monotona, calibrata su range VPD campo
-    d0 = 1.30
-    factor = 1.0 / (1.0 + (demand / d0) ** 2.3)
-    factor = max(0.42, min(1.0, factor))
-
-    # Peso fisiologico: quanto i carpofori/primordia sono esposti all'aria
-    if since is None:
-        weight = 0.30
-    elif since <= 4:
-        weight = 0.60  # lettiera bagnata: vento ri-asciuga film superficiale
-    elif since <= 16:
-        weight = 1.00  # finestra fruizione
-    else:
-        weight = 0.35
-
-    blended = 1.0 - weight * (1.0 - factor)
-    dry_frac = (sum(dry_flags) / len(dry_flags)) if dry_flags else None
-    gust_u = sum(gusts) / len(gusts) if gusts else 0.0
-    # Settore secco dominante + vento che arriva al suolo: abort dei primordia.
-    # Lo scirocco umido non entra (dry_frac basso). ET0 non si rimoltiplica.
-    if (
-        dry_frac is not None
-        and dry_frac >= 0.66
-        and since is not None
-        and since <= 16
-        and max(u, gust_u) >= 1.5
-    ):
-        strong = max(u, gust_u) >= 3.0
-        blended = max(0.35, blended * (0.62 if strong else 0.82))
+    # Equilibrio di stress severo (~0.67) → pavimento fisiologico 0.35. Un giorno solo no.
+    gain = min(1.0, damage / 0.73)
+    mult = max(0.35, min(1.0, 1.0 - (1.0 - 0.35) * gain))
     meta = {
-        "vpd": round(vpd, 2),
-        "wind_ms": round(u, 2),
-        "evap_demand": round(demand, 2),
-        "desiccation": round(blended, 2),
-        "dry_wind": None if dry_frac is None else round(dry_frac, 2),
+        "vpd": round(vpd_e, 2),
+        "wind_ms": round(wind_e, 2),
+        "evap_demand": round(dem_e, 2),
+        "desiccation": round(mult, 2),
+        "dry_wind": None if not have_dry else round(dry_e, 2),
     }
-    return blended, meta
+    return mult, meta
 
 
-def _shock(days: list[dict]) -> bool:
-    if len(days) < 14:
-        return False
-    window = days[-14:-7]
-    after = days[-7:]
+def _shock_level(days: list[dict]) -> float:
+    """
+    Impulso pioggia+raffreddamento, 0–1, decadimento τ = 6 gg.
+    Soglie morbide (niente bool). Il giorno in cui l'evento esce da una
+    scatola di 7 gg non spegne più il termine di colpo.
+    """
+    n = len(days)
+    if n < 8:
+        return 0.0
     best = 0.0
-    for i in range(len(window) - 1):
-        best = max(best, (window[i].get("precip") or 0) + (window[i + 1].get("precip") or 0))
-    t_before = _mean([d.get("tmean") for d in window])
-    t_after = _mean([d.get("tmean") for d in after])
-    if t_before is None or t_after is None:
-        return False
-    return best >= 15 and (t_before - t_after) >= 3
+    for i in range(1, n):
+        age = n - 1 - i
+        if age < 3 or age > 28:
+            continue
+        rain2 = (days[i].get("precip") or 0) + (days[i - 1].get("precip") or 0)
+        before = days[max(0, i - 7) : i]
+        after = days[i + 1 : i + 8]
+        if len(before) < 3 or len(after) < 3:
+            continue
+        tb = _mean([d.get("tmean") for d in before])
+        ta = _mean([d.get("tmean") for d in after])
+        if tb is None or ta is None:
+            continue
+        cool = _smoothstep(((tb - ta) - 1.5) / 3.5)
+        wet = _smoothstep((rain2 - 8.0) / 17.0)
+        level = cool * wet * math.exp(-age / _TAU_SHOCK)
+        if level > best:
+            best = level
+    return best
 
 
 def _bucket(days: list[dict], slope: float, twi: float, rad: float) -> tuple[float, float]:
@@ -277,7 +348,7 @@ def _bucket(days: list[dict], slope: float, twi: float, rad: float) -> tuple[flo
     """
     cap = min(0.42, 0.20 + 0.04 * max(0.0, twi))
     swc = min(cap, 0.22)
-    good = 0.0
+    fits: list[float] = []
     used = days[-26:] if len(days) > 26 else days
     if not used:
         return swc, 0.0
@@ -290,8 +361,18 @@ def _bucket(days: list[dict], slope: float, twi: float, rad: float) -> tuple[flo
         swc = max(0.04, min(cap, swc))
         model = d.get("smoist")
         blend = swc if model is None else 0.5 * swc + 0.5 * min(cap, max(0.04, model))
-        good += math.exp(-0.5 * ((blend - 0.24) / 0.05) ** 2)
-    return swc, 100.0 * good / len(used)
+        fits.append(math.exp(-0.5 * ((blend - 0.24) / 0.05) ** 2))
+    # Pesi esponenziali, più recenti più forti. A regime costante = media piatta di prima.
+    # Il giorno che esce dai 26 gg pesa e^(-25/τ) e non sposta l'abbondanza di 1/26.
+    lam = math.exp(-1.0 / _TAU_ABUND)
+    w = 1.0
+    wsum = 0.0
+    fsum = 0.0
+    for fit in reversed(fits):
+        wsum += w
+        fsum += w * fit
+        w *= lam
+    return swc, 100.0 * fsum / wsum
 
 
 def _incub_peak(aspect: float, slope: float) -> float:
@@ -302,23 +383,16 @@ def _incub_peak(aspect: float, slope: float) -> float:
 
 
 def _incubation(days: list[dict], aspect: float = 180.0, slope: float = 0.0) -> tuple[int | None, float]:
-    """Giorni dall'ultima pioggia innescante (>=20 mm in 3 giorni). Picco spostato dal versante."""
+    """
+    Età e ampiezza della buttata più viva. Gaussiana σ = 4 gg intorno al picco
+    di versante. Più innesco convivono: si tiene il massimo, non si riazzera l'orologio.
+    """
     daily = [(d.get("precip") or 0) for d in days]
-    last = None
-    for i in range(len(daily) - 1, -1, -1):
-        block = sum(daily[max(0, i - 2) : i + 1])
-        if block >= 20:
-            last = len(daily) - 1 - i
-            break
-    if last is None:
+    triggers = _triggers(daily)
+    if not triggers:
         return None, 0.0
     peak = _incub_peak(aspect, slope)
-    if last < 5:
-        return last, 0.35
-    hi = 18.0 + max(0.0, peak - 11.0)
-    if last <= hi:
-        return last, math.exp(-0.5 * ((last - peak) / 4.0) ** 2)
-    return last, 0.15
+    return _best_flush(triggers, len(daily) - 1, peak)
 
 
 # Quanto un'estate fredda pesa in più sulle specie termofile.
@@ -347,23 +421,27 @@ def radiation_factor(aspect: float, slope: float) -> float:
     return max(0.65, min(1.35, 1 + 0.25 * southness * tilt))
 
 
-def _stage(hab: float, today: dict, best: dict) -> int:
-    """1 idonea ferma, 2 incubazione, 3 avvio, 4 buona, 5 eccezionale. 0 = habitat chiuso."""
+def _abund_gate(p: float) -> float:
+    """Logistica: sotto ~0.32 la quantità sfuma. Niente azzeramento a 0.35."""
+    return 1.0 / (1.0 + math.exp(-(p - 0.32) / 0.05))
+
+
+def _stage(hab: float, today: dict) -> int:
+    """1 idonea ferma, 2 incubazione, 3 avvio, 4 buona, 5 eccezionale. 0 = habitat chiuso.
+
+    Solo il giorno osservato. Un forecast più alto non promuove lo stadio.
+    """
     if hab <= 0:
         return 0
     p = today.get("p") or 0
     abund = today.get("abundance") or 0
-    since = today.get("since_rain")
-    ahead = (best.get("p") or 0) >= P_ASPETTA and (best.get("p") or 0) > p + 0.08 and best.get("date") != today.get("date")
     if p >= 0.62 and abund >= 65:
         return 5
     if p >= P_VAI and abund >= A_VAI:
         return 4
     if p >= 0.38 and abund >= 15:
         return 3
-    if since is not None and since <= 18:
-        return 2
-    if ahead:
+    if (today.get("incub") or 0) >= 0.25:
         return 2
     return 1
 
@@ -411,29 +489,29 @@ def score_series(
                 incomplete = True
         tmean = _mean(temps)
         rain26 = sum((d.get("precip") or 0) for d in past[-26:])
-        rain_term = min(1.0, rain26 / 80.0)
-        shock = _shock(past)
+        rain_term = _rain_term(past)
+        shock = _shock_level(past)
         therm = _therm(tmean, spec["topt"])
         since, incub = _incubation(past, aspect, slope)
         rh = _mean([d.get("rh") for d in past[-5:]])
         rh_term = 1.0 if rh is None else max(0.75, min(1.1, 0.55 + rh / 150.0))
-        dry, dry_meta = _desiccation(past, leaf, since)
+        dry, dry_meta = _desiccation(past, leaf, aspect, slope)
         p = hab * therm * rh_term * dry * (
-            0.25 + 0.25 * rain_term + 0.35 * incub + (0.15 if shock else 0.0)
+            0.25 + 0.25 * rain_term + 0.35 * incub + 0.15 * shock
         )
         p = min(1.0, p)
         swc, abund = _bucket(past, slope, twi, rad)
         # Carpofori esposti: stessa domanda evaporativa taglia anche abbondanza utile
         abund *= 0.55 + 0.45 * dry
-        if p < 0.35:
-            abund = 0.0
+        abund *= _abund_gate(p)
         out_days.append(
             {
                 "date": past[-1].get("date"),
                 "p": round(p, 3),
                 "abundance": round(abund, 1),
                 "t": None if tmean is None else round(tmean, 1),
-                "shock": shock,
+                "shock": round(shock, 2),
+                "forecast": idx > today_index,
                 "swc": round(swc, 3),
                 "rain26": round(rain26, 1),
                 "since_rain": since,
@@ -448,18 +526,34 @@ def score_series(
     if not out_days:
         return {"decision": "prudenza", "days": [], "incomplete": True}
     today = out_days[0]
-    best = max(out_days, key=lambda d: d["p"])
+    # Data del picco dall'orologio storico (since → picco di versante).
+    # Non è l'argmax dei giorni di forecast: quel massimo sparisce se GFS corregge la pioggia.
+    peak_date = None
+    since_now = today.get("since_rain")
+    if (
+        since_now is not None
+        and today.get("date")
+        and (today.get("incub") or 0) >= 0.25
+        and since_now < _incub_peak(aspect, slope) - 0.5
+    ):
+        try:
+            base = date.fromisoformat(str(today["date"])[:10])
+            ahead = int(round(_incub_peak(aspect, slope) - since_now))
+            peak_date = (base + timedelta(days=ahead)).isoformat()
+        except ValueError:
+            peak_date = None
+    best = {"date": peak_date, "p": today["p"]} if peak_date else {}
     if hab == 0 or today["t"] is None:
         decision = "lascia" if hab == 0 else "prudenza"
     elif today["p"] >= P_VAI and today["abundance"] >= A_VAI:
         decision = "vai"
-    elif best["p"] >= P_ASPETTA and best["p"] > today["p"] + 0.08:
+    elif (today.get("incub") or 0) >= 0.25:
         decision = "aspetta"
     else:
         decision = "lascia"
     if incomplete and decision == "vai":
         decision = "prudenza"
-    stage = _stage(hab, today, best)
+    stage = _stage(hab, today)
     return {
         "decision": decision,
         "stage": stage,

@@ -319,9 +319,10 @@
       if (c.elev != null) tags.push(Math.round(c.elev) + " m");
       if (c.since_rain != null) tags.push(`pioggia ${c.since_rain} gg fa`);
       if (c.rain26 != null) tags.push(`${Math.round(c.rain26)} mm in 26 gg`);
-      if (c.shock) tags.push("shock termico");
+      if ((c.shock || 0) >= 0.35) tags.push("shock termico");
       if (c.wind_ms != null) tags.push(`vento sottobosco ${c.wind_ms.toFixed(1)} m/s`);
       if (c.vpd != null) tags.push(`VPD ${c.vpd.toFixed(2)} kPa`);
+      if (c.dry_wind != null && c.dry_wind >= 0.45) tags.push("settore secco ancora in corso");
       if (c.desiccation != null && c.desiccation < 0.92) {
         tags.push(`desiccazione ×${c.desiccation.toFixed(2)}`);
       }
@@ -468,12 +469,14 @@
       const days = d.days || [];
       const spark = days.map((x) => {
         const h = Math.max(2, Math.round((x.p || 0) * 46));
-        return `<div style="height:${h}px;background:${x.p >= 0.55 ? "var(--s4)" : x.p >= 0.38 ? "var(--s3)" : "var(--s2)"}" title="${x.date}: ${Math.round((x.p || 0) * 100)}%"></div>`;
+        const fade = x.forecast ? "0.45" : "1";
+        return `<div style="height:${h}px;opacity:${fade};background:${x.p >= 0.55 ? "var(--s4)" : x.p >= 0.38 ? "var(--s3)" : "var(--s2)"}" title="${x.date}: ${Math.round((x.p || 0) * 100)}%${x.forecast ? " tendenza" : ""}"></div>`;
       }).join("");
       const ends = days.length ? [dayLabel(days[0].date), dayLabel(days[days.length - 1].date)] : ["", ""];
       const year = d.last_year ? `${d.last_year.rain26} mm` : "non disponibile";
       box.innerHTML = `
-        <h4>Prossimi giorni</h4>
+        <h4>Tendenza</h4>
+        <p class="sub">Barra piena = oggi, da dati già osservati. Quelle sbiadite sono forecast: possono muoversi senza cambiare la buttata di oggi.</p>
         <div class="spark">${spark}</div>
         <div class="spark-x"><span>${ends[0]}</span><span>${ends[1]}</span></div>
         <h4>Il posto</h4>
@@ -496,7 +499,7 @@
           <tr><td>Temperatura suolo</td><td>${d.t ?? "n.d."} °C</td></tr>
           <tr><td>Pioggia 26 giorni</td><td>${Math.round(d.rain26 || 0)} mm</td></tr>
           <tr><td>VPD aria</td><td>${d.vpd != null ? d.vpd.toFixed(2) + " kPa" : "n.d."}</td></tr>
-          <tr><td>Vento sottobosco</td><td>${d.wind_ms != null ? d.wind_ms.toFixed(1) + " m/s" : "n.d."}${d.dry_wind != null && d.dry_wind >= 0.66 ? " · settore secco" : ""}</td></tr>
+          <tr><td>Vento sottobosco</td><td>${d.wind_ms != null ? d.wind_ms.toFixed(1) + " m/s" : "n.d."}${d.dry_wind != null && d.dry_wind >= 0.45 ? " · settore secco ancora in corso" : ""}</td></tr>
           <tr><td>Fattore desiccazione</td><td>${d.desiccation != null ? "×" + d.desiccation.toFixed(2) : "n.d."}</td></tr>
           <tr><td>Un anno fa</td><td>${year}</td></tr>
         </table>`;
