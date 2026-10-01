@@ -9,6 +9,12 @@ import vault
 
 
 def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] == "pages":
+        from pathlib import Path
+
+        out = Path(sys.argv[2] if len(sys.argv) > 2 else "_site")
+        vault.export_pages(out)
+        return
     vault.install_core()
     if len(sys.argv) > 1 and sys.argv[1] == "build":
         import build_cdn_bundle

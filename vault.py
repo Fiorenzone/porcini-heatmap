@@ -274,3 +274,35 @@ def render_app(token: str) -> bytes:
     if needle not in html:
         raise RuntimeError("script mappa assente")
     return html.replace(needle, boot, 1).encode("utf-8")
+
+
+def export_pages(dest: Path) -> None:
+    """Pages: mappa decifrata + hash gate. Niente /api/login sul CDN."""
+    key = passphrase()
+    if not key:
+        print("PORCINI_KEY mancante", flush=True)
+        raise SystemExit(1)
+    try:
+        html = open_vault((VAULT / "index.html.enc").read_bytes(), key)
+        js = open_vault((VAULT / "heatmap.js.enc").read_bytes(), key)
+        pw = open_vault((VAULT / "gate.enc").read_bytes(), key)
+    except Exception:
+        print("vault illeggibile", flush=True)
+        raise SystemExit(1)
+    dest.mkdir(parents=True, exist_ok=True)
+    guard = (
+        b"<script>(function(){if(sessionStorage.getItem('porcini_gate')!=='1')"
+        b"{location.replace('./');}})();</script>\n"
+    )
+    text = html.decode("utf-8")
+    if "<head>" in text:
+        text = text.replace("<head>", "<head>\n" + guard.decode("utf-8"), 1)
+    else:
+        text = guard.decode("utf-8") + text
+    (dest / "map.html").write_text(text, encoding="utf-8")
+    (dest / "heatmap.js").write_bytes(js)
+    (dest / "gate.json").write_text(
+        json.dumps({"h": hashlib.sha256(pw).hexdigest()}, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    print("pages ui ok", flush=True)

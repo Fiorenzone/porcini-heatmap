@@ -34,8 +34,11 @@ jobs:
           PORCINI_BUILD_GRID: "0"
         run: python3 boot.py build
       - name: Assemble static site
+        env:
+          PORCINI_KEY: ${{ secrets.PORCINI_KEY }}
         run: |
           mkdir -p _site/data
+          python3 boot.py pages _site
           cp static/enter.html _site/index.html
           cp static/regions_it.json _site/
           cp static/data/meta.json static/data/heatmap.bin.gz static/data/bulletins.json _site/data/

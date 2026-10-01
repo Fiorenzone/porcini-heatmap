@@ -108,25 +108,53 @@
     document.getElementById("gate").onsubmit = async (ev) => {
       ev.preventDefault();
       const msg = document.getElementById("msg");
+      const pw = document.getElementById("pw").value;
       msg.textContent = "";
+      async function hexSha(text) {
+        const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+        return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+      }
+      async function staticEnter() {
+        const gate = await fetch("./gate.json", { cache: "no-store" });
+        if (!gate.ok) throw new Error("gate");
+        const body = await gate.json();
+        if (!body || typeof body.h !== "string" || (await hexSha(pw)) !== body.h) {
+          msg.textContent = "Password errata";
+          return;
+        }
+        sessionStorage.setItem("porcini_gate", "1");
+        location.href = "./map.html";
+      }
       let res;
       try {
         res = await fetch("/api/login", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ password: document.getElementById("pw").value })
+          body: JSON.stringify({ password: pw })
         });
       } catch (_) {
-        msg.textContent = "rete";
+        try {
+          await staticEnter();
+        } catch (_) {
+          msg.textContent = "rete";
+        }
         return;
       }
-      if (!res.ok) {
-        msg.textContent = res.status === 401 ? "Password errata" : "accesso non disponibile";
+      if (res.ok) {
+        document.open();
+        document.write(await res.text());
+        document.close();
         return;
       }
-      document.open();
-      document.write(await res.text());
-      document.close();
+      if (res.status === 401) {
+        msg.textContent = "Password errata";
+        return;
+      }
+      try {
+        await staticEnter();
+      } catch (_) {
+        msg.textContent = "accesso non disponibile";
+      }
     };
   })();
   </script>
