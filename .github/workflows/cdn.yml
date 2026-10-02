@@ -1,5 +1,7 @@
 name: cdn-heatmap
 
+# Schedule GitHub = best-effort. Affidabile: cron esterno → workflow_dispatch
+# (vedi scripts/trigger-cdn.sh → cron-job.org ogni 3 ore).
 on:
   schedule:
     - cron: "15 */3 * * *"
@@ -13,8 +15,8 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pages
-  cancel-in-progress: true
+  group: cdn-heatmap
+  cancel-in-progress: false
 
 jobs:
   build:
